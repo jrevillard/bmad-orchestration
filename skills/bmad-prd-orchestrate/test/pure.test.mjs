@@ -311,3 +311,70 @@ test('findUnmetDeps preserves dep order', () => {
   // journal entries can be diffed across runs.
   assert.deepEqual([...fn(['c-dep', 'a-dep', 'b-dep'], { 'a-dep': 'review', 'b-dep': 'done', 'c-dep': 'in-progress' })], ['c-dep', 'a-dep']);
 });
+
+// ============================================================================
+// applyUserChoice(planResult, userChoice, confirmedDeps) → { planResult, halt }
+// Pure transformation: takes the plan result + the operator's userChoice from
+// a halted run + optional confirmedDeps (operator-edited graph), returns the
+// modified planResult + whether the run should halt (aborted).
+// ============================================================================
+
+test('applyUserChoice abort_prd returns halt=true', () => {
+  const fn = extractFunction(source, 'applyUserChoice');
+  const planResult = { inferred: [{ story: '1-1', depends_on: [] }] };
+  const { planResult: out, halt } = fn(planResult, 'abort_prd', null);
+  assert.equal(halt, true);
+  // planResult unchanged for abort
+  assert.deepEqual([...out.inferred], [{ story: '1-1', depends_on: [] }]);
+});
+
+test('applyUserChoice proceed_without_inference clears inferred graph', () => {
+  const fn = extractFunction(source, 'applyUserChoice');
+  const planResult = { inferred: [{ story: '1-1', depends_on: ['1-2'] }] };
+  const { planResult: out, halt } = fn(planResult, 'proceed_without_inference', null);
+  assert.equal(halt, false);
+  assert.deepEqual([...out.inferred], []);
+});
+
+test('applyUserChoice confirm_deps without confirmedDeps uses planResult.inferred as-is', () => {
+  const fn = extractFunction(source, 'applyUserChoice');
+  const planResult = { inferred: [{ story: '1-1', depends_on: ['1-2'] }] };
+  const { planResult: out, halt } = fn(planResult, 'confirm_deps', null);
+  assert.equal(halt, false);
+  assert.deepEqual([...out.inferred], [{ story: '1-1', depends_on: ['1-2'] }]);
+});
+
+test('applyUserChoice confirm_deps with array confirmedDeps replaces graph', () => {
+  const fn = extractFunction(source, 'applyUserChoice');
+  const planResult = { inferred: [{ story: 'old', depends_on: [] }] };
+  const edited = [{ story: '1-1', depends_on: ['1-2'] }, { story: '1-2', depends_on: [] }];
+  const { planResult: out, halt } = fn(planResult, 'confirm_deps', edited);
+  assert.equal(halt, false);
+  assert.deepEqual([...out.inferred], edited);
+});
+
+test('applyUserChoice confirm_deps with object confirmedDeps converts to entries', () => {
+  const fn = extractFunction(source, 'applyUserChoice');
+  const planResult = { inferred: [] };
+  const edited = { '1-1': ['1-2', '1-3'], '1-2': [] };
+  const { planResult: out, halt } = fn(planResult, 'confirm_deps', edited);
+  assert.equal(halt, false);
+  assert.equal(out.inferred.length, 2);
+  // Sort + spread to clone into host Array.prototype (vm sandbox issue).
+  const sorted = [...out.inferred].sort((a, b) => a.story.localeCompare(b.story));
+  assert.deepEqual(
+    sorted.map(e => ({ story: e.story, depends_on: [...e.depends_on] })),
+    [
+      { story: '1-1', depends_on: ['1-2', '1-3'] },
+      { story: '1-2', depends_on: [] },
+    ],
+  );
+});
+
+test('applyUserChoice unknown userChoice returns halt=false and planResult unchanged', () => {
+  const fn = extractFunction(source, 'applyUserChoice');
+  const planResult = { inferred: [{ story: '1-1', depends_on: [] }] };
+  const { planResult: out, halt } = fn(planResult, 'something_weird', null);
+  assert.equal(halt, false);
+  assert.deepEqual([...out.inferred], [{ story: '1-1', depends_on: [] }]);
+});

@@ -51,6 +51,40 @@ function findUnmetDeps(deps, depStatuses) {
   return deps.filter(d => (depStatuses || {})[d] !== 'done');
 }
 
+// applyUserChoice(planResult, userChoice, confirmedDeps) → { planResult, halt }
+// Pure transformation of a halted run's planResult based on the operator's
+// userChoice. Returns the new planResult + whether to halt (abort_prd only).
+// Pure: no I/O, no agent calls — just object manipulation.
+function applyUserChoice(planResult, userChoice, confirmedDeps) {
+  const newPlanResult = { ...planResult, inferred: [...(planResult.inferred || [])] };
+  let halt = false;
+  switch (userChoice) {
+    case 'abort_prd':
+      halt = true;
+      break;
+    case 'proceed_without_inference':
+      newPlanResult.inferred = [];
+      break;
+    case 'confirm_deps':
+      if (confirmedDeps) {
+        if (Array.isArray(confirmedDeps)) {
+          newPlanResult.inferred = confirmedDeps;
+        } else if (typeof confirmedDeps === 'object') {
+          newPlanResult.inferred = Object.entries(confirmedDeps).map(([story, deps]) => ({
+            story,
+            depends_on: Array.isArray(deps) ? deps : [],
+          }));
+        }
+      }
+      // else: keep newPlanResult.inferred as-is (already cloned)
+      break;
+    default:
+      // Unknown userChoice: leave planResult unchanged (orchestrator logs WARNING + falls through).
+      break;
+  }
+  return { planResult: newPlanResult, halt };
+}
+
 const args_ = args || {};
 const storyKey = args_.storyKey || null;
 const epicKey = args_.epicKey || null;
@@ -302,35 +336,24 @@ const buildPlanState = () => ({
 // choice BEFORE the fresh-run halt block below so a resumed run never
 // re-prompts the dep-inference confirmation that was already given.
 if (userChoice) {
+  // Use pure helper to apply the operator's userChoice (test/pure.test.mjs).
+  const { planResult: newPR, halt } = applyUserChoice(planResult, userChoice, confirmedDeps);
+  planResult.inferred = newPR.inferred;
   if (userChoice === 'confirm_deps') {
-    // Operator reviewed inferred graph at dep_inference_confirm halt and said confirm.
-    // If the dispatcher ALSO passes confirmedDeps (operator-edited graph), use that.
-    // Otherwise proceed with state.inferred / planResult.inferred as-is.
-    if (confirmedDeps) {
-      log(`Resuming with confirm_deps (+ edited confirmedDeps entries: ${Array.isArray(confirmedDeps) ? confirmedDeps.length : Object.keys(confirmedDeps).length})`)
-      if (Array.isArray(confirmedDeps)) {
-        planResult.inferred = confirmedDeps
-      } else if (typeof confirmedDeps === 'object') {
-        planResult.inferred = Object.entries(confirmedDeps).map(([story, deps]) => ({
-          story,
-          depends_on: Array.isArray(deps) ? deps : [],
-        }))
-      }
-      log(`Updated inferred to ${planResult.inferred.length} confirmed entries`)
-    } else {
-      log(`Resuming with confirm_deps (using inferred graph as-is, entries: ${planResult.inferred?.length || 0})`)
-    }
-    await writeState(buildPlanState())
+    log(confirmedDeps
+      ? `Resuming with confirm_deps (+ edited confirmedDeps entries: ${Array.isArray(confirmedDeps) ? confirmedDeps.length : Object.keys(confirmedDeps).length})`
+      : `Resuming with confirm_deps (using inferred graph as-is, entries: ${planResult.inferred?.length || 0})`);
+    if (confirmedDeps) log(`Updated inferred to ${planResult.inferred.length} confirmed entries`);
+    await writeState(buildPlanState());
   } else if (userChoice === 'proceed_without_inference') {
-    log(`Resuming with proceed_without_inference (clearing inferred graph)`)
-    planResult.inferred = []
-    await writeState(buildPlanState())
+    log(`Resuming with proceed_without_inference (clearing inferred graph)`);
+    await writeState(buildPlanState());
   } else if (userChoice === 'abort_prd') {
-    log(`Aborting per userChoice=abort_prd`)
-    return { aborted: true, haltReason: 'aborted', timestamp, runDir }
+    log(`Aborting per userChoice=abort_prd`);
+    return { aborted: true, haltReason: 'aborted', timestamp, runDir };
   } else {
-    log(`WARNING: unrecognized userChoice=${userChoice}; falling through to Phase 3`)
-    await writeState(buildPlanState())
+    log(`WARNING: unrecognized userChoice=${userChoice}; falling through to Phase 3`);
+    await writeState(buildPlanState());
   }
 } else if (resume) {
   // Resume token without userChoice → re-halt with current state
