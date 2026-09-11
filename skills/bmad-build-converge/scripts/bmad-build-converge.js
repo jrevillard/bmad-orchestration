@@ -437,7 +437,7 @@ STEPS:
    Capture { mr_iid } from the Skill's stdout return. If mr_iid is empty (find-mr found nothing — should not happen post-ensure-mr), set mrIid=0 and mrResult.error="find-mr returned no mr_iid after ensure-mr".
 3. After the ensure-mr Skill returns: rm -f "${relSpecPath}" as BMAD_MR_DESCRIPTION_FILE cleanup (per SKILL.md "Cleanup: the Skill caller's agent does rm -f on BMAD_MR_DESCRIPTION_FILE after Skill returns"; best-effort — swallow errors).
 4. Fetch first pipeline id (RACE-AWARE: push may not have triggered a pipeline yet; pipeline_id may be empty):
-   BMAD_MR_ACTION=get-mr-pipeline BMAD_MR_IID=<captured mr_iid> Skill: bmad-issue-tracking-sync.
+   BMAD_MR_ACTION=get-mr-pipeline BMAD_MR_IID=<captured mr_iid> BMAD_MR_REPO="${setup.mrRepo}" Skill: bmad-issue-tracking-sync.
    Capture { pipeline_id, pipeline_status }. If pipeline_id is empty, treat as "no pipeline yet" — set pipelineId=0 and pipelineStatus="none" (the CI loop will pick up the real pipeline when it polls).
 5. If any Skill call soft-fails (no mr_iid returned, OR ensure-mr error), return early with the error string set (NEVER halt the build — Phase 2 fallback is to skip MR creation).
 
@@ -645,11 +645,11 @@ while (ciIter < ciMaxIterations) {
 MR was created in Phase 2 — guaranteed to exist. Use MR pipeline only.
 
 STEPS:
-1. Get latest MR pipeline: BMAD_MR_ACTION=get-mr-pipeline BMAD_MR_IID=${mrResult.mrIid} Skill: bmad-issue-tracking-sync. Capture { pipeline_id, pipeline_status }.
+1. Get latest MR pipeline: BMAD_MR_ACTION=get-mr-pipeline BMAD_MR_REPO="${setup.mrRepo}" BMAD_MR_IID=${mrResult.mrIid} Skill: bmad-issue-tracking-sync. Capture { pipeline_id, pipeline_status }.
 2. Poll status: \`Bash(command="${args.helpersDir}ci-monitor.sh <pipelineId> 30", run_in_background=true)\` + \`TaskOutput(block=true, timeout=1800000)\`. Read the "TERMINAL:<status>" line.
 3. If status='success': return { pipelineId, status: 'success' }.
 4. If status != 'success': classify failure.
-   - BMAD_MR_ACTION=get-failed-jobs BMAD_PIPELINE_ID=<pipeline_id> Skill: bmad-issue-tracking-sync.
+   - BMAD_MR_ACTION=get-failed-jobs BMAD_MR_REPO="${setup.mrRepo}" BMAD_PIPELINE_ID=<pipeline_id> Skill: bmad-issue-tracking-sync.
    - Capture { jobs } (newline-separated TSV per common/get-failed-jobs.yaml header — each line is "name<TAB>exit_code<TAB>trace_tail"; note snake_case exit_code field, NOT camelCase exitCode).
    - Transform into failedJobs=[{name, exitCode, excerpt: trace_tail}] + traceTail=concatenated trace_tails (best-effort).
 5. Return JSON: { pipelineId, status, failedJobs: [{name, exitCode, excerpt}], traceTail: <concatenated excerpts> }`,
@@ -837,7 +837,7 @@ CONTEXT:
 - storyKey: ${setup.storyKey}
 
 STEPS:
-1. Merge: BMAD_MR_ACTION=merge-mr BMAD_MR_IID=${mrResult.mrIid} BMAD_MR_SQUASH=false Skill: bmad-issue-tracking-sync.
+1. Merge: BMAD_MR_ACTION=merge-mr BMAD_MR_REPO="${setup.mrRepo}" BMAD_MR_IID=${mrResult.mrIid} BMAD_MR_SQUASH=false Skill: bmad-issue-tracking-sync.
    Capture { merged, merge_sha, error }. If merged=false, set merged=false with error string.
 2. After successful merge, sync sprint-status to done. Operate from the PRD worktree (${setup.prdWorktreePath}).
    - cd ${setup.prdWorktreePath}
