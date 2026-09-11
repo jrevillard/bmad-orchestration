@@ -125,17 +125,7 @@ test('toRepoRelativePath uses repo root when worktree does NOT match', () => {
   assert.equal(fn('/home/jerome/proj/_bmad-output/x.md', '/home/jerome/proj/.wt', '/home/jerome/proj'), '_bmad-output/x.md');
 });
 
-test('toRepoRelativePath handles empty specPath', () => {
-  const fn = extractFunction(source, 'toRepoRelativePath');
-  assert.equal(fn('', '/wt', '/repo'), '');
-});
-
-test('toRepoRelativePath handles empty specPath', () => {
-  const fn = extractFunction(source, 'toRepoRelativePath');
-  assert.equal(fn('', '/wt', '/repo'), '');
-});
-
-test('toRepoRelativePath handles empty specPath', () => {
+test('toRepoRelativePath handles empty/falsy specPath', () => {
   const fn = extractFunction(source, 'toRepoRelativePath');
   // specPath is falsy → returns '' (defensive guard at return).
   assert.equal(fn(null, '/wt', '/repo'), '');
@@ -243,4 +233,91 @@ test('buildDispatchMarker uses BMADBC prefix (orchestrator convention)', () => {
   const fn = extractFunction(source, 'buildDispatchMarker');
   // Marker prefix identifies orchestrator-owned temp files in /tmp.
   assert.match(fn('any-key', 0), /^BMADBC_/);
+});
+
+// ============================================================================
+// parseDispatchEnvelope(stdoutText) → { structured_output } | { error }
+// Parses claude -p --output-format stream-json output. Returns the
+// structured_output from the last `result` event, or { error } if no
+// envelope is found. Handles NDJSON (multi-line), single-object JSON,
+// and JSON-array forms (backward compat). Pure: string in, object out.
+// ============================================================================
+
+test('parseDispatchEnvelope parses NDJSON — finds last result event', () => {
+  const fn = extractFunction(source, 'parseDispatchEnvelope');
+  const stdout = [
+    JSON.stringify({ type: 'system', message: 'starting' }),
+    JSON.stringify({ type: 'assistant', message: { content: 'thinking' } }),
+    JSON.stringify({ type: 'result', structured_output: { foo: 'bar' } }),
+  ].join('\n');
+  const out = fn(stdout);
+  // Spread to clone into host Array.prototype (vm sandbox Array.prototype differs).
+  assert.deepEqual({...out}, { foo: 'bar' });
+});
+
+test('parseDispatchEnvelope prefers last result event over earlier ones', () => {
+  const fn = extractFunction(source, 'parseDispatchEnvelope');
+  const stdout = [
+    JSON.stringify({ type: 'result', structured_output: { first: true } }),
+    JSON.stringify({ type: 'system', message: 'still going' }),
+    JSON.stringify({ type: 'result', structured_output: { second: true } }),
+  ].join('\n');
+  const out = fn(stdout);
+  assert.deepEqual({...out}, { second: true });
+});
+
+test('parseDispatchEnvelope accepts events with structured_output directly (no type field)', () => {
+  const fn = extractFunction(source, 'parseDispatchEnvelope');
+  const stdout = JSON.stringify({ structured_output: { x: 1 } });
+  const out = fn(stdout);
+  assert.deepEqual({...out}, { x: 1 });
+});
+
+test('parseDispatchEnvelope handles single-object JSON (no newlines)', () => {
+  const fn = extractFunction(source, 'parseDispatchEnvelope');
+  const out = fn(JSON.stringify({ structured_output: { ok: true } }));
+  assert.deepEqual({...out}, { ok: true });
+});
+
+test('parseDispatchEnvelope handles JSON-array form (backward compat)', () => {
+  const fn = extractFunction(source, 'parseDispatchEnvelope');
+  const arr = [
+    { type: 'system', message: 'init' },
+    { type: 'result', structured_output: { fromArray: true } },
+  ];
+  const out = fn(JSON.stringify(arr));
+  assert.deepEqual({...out}, { fromArray: true });
+});
+
+test('parseDispatchEnvelope strips trailing EXIT_CODE= marker', () => {
+  const fn = extractFunction(source, 'parseDispatchEnvelope');
+  // Wrapper bash script may append `EXIT_CODE=0` after the JSON.
+  const stdout = JSON.stringify({ structured_output: { ok: true } }) + '\nEXIT_CODE=0';
+  const out = fn(stdout);
+  assert.deepEqual({...out}, { ok: true });
+});
+
+test('parseDispatchEnvelope returns error when no envelope found', () => {
+  const fn = extractFunction(source, 'parseDispatchEnvelope');
+  const out = fn('just plain text with no json');
+  assert.ok(out.error, 'expected error');
+  assert.match(out.error, /missing structured_output/);
+});
+
+test('parseDispatchEnvelope returns error on empty input', () => {
+  const fn = extractFunction(source, 'parseDispatchEnvelope');
+  const out = fn('');
+  assert.ok(out.error);
+});
+
+test('parseDispatchEnvelope skips non-JSON lines in NDJSON', () => {
+  const fn = extractFunction(source, 'parseDispatchEnvelope');
+  // Mixed garbage + valid JSON lines.
+  const stdout = [
+    'garbage line that is not JSON',
+    '',
+    JSON.stringify({ type: 'result', structured_output: { survived: true } }),
+  ].join('\n');
+  const out = fn(stdout);
+  assert.deepEqual({...out}, { survived: true });
 });

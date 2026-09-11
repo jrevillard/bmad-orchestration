@@ -57,6 +57,11 @@ const SETUP_SCHEMA = {
     sprintStatusPath: { type: 'string' },
     specPath: { type: 'string' },
     prdBranch: { type: 'string' },
+    // currentStatus: the development_status[storyKey] value the setup agent reads.
+    // Used post-setup by shouldAcceptStoryStatus() to gate the dispatch. If the
+    // status is 'done' / 'awaiting-operator' / 'blocked' / unknown, the
+    // dispatch halts instead of starting build for a story we shouldn't touch.
+    currentStatus: { type: 'string' },
     // mrRepo = host + '/' + project from issue-tracking.yaml. Constructed by
     // SETUP agent so downstream phases (mr-create) don't have to re-parse the
     // config or re-read it from disk. Used as BMAD_MR_REPO for Skill: bmad-issue-tracking-sync.
@@ -64,7 +69,7 @@ const SETUP_SCHEMA = {
   },
   required: ['storyKey', 'repoRoot', 'prdWorktreePath', 'prdKey', 'baseBranch', 'storyBranch',
              'worktreePath', 'baselineSha', 'resumedFromBranch', 'sprintStatusUpdated',
-             'sprintStatusPath', 'specPath', 'prdBranch', 'mrRepo'],
+             'sprintStatusPath', 'specPath', 'prdBranch', 'mrRepo', 'currentStatus'],
 };
 
 const BUILD_SCHEMA = {
@@ -168,6 +173,40 @@ function shouldAcceptStoryStatus(status) {
 function buildDispatchMarker(storyKey, dispatchSeq) {
   const safeStoryKey = (storyKey || '').replace(/[^a-zA-Z0-9_-]/g, '_');
   return `BMADBC_${safeStoryKey}_${dispatchSeq}`;
+}
+
+// parseDispatchEnvelope(stdoutText) → { structured_output } | { error }
+// Parses claude -p --output-format stream-json output. Walks NDJSON lines
+// backward to find the last `result` event. Falls back to single-object
+// JSON (backward compat with --output-format json) and JSON-array forms.
+// Strips trailing EXIT_CODE= marker added by the wrapper bash script.
+// Pure: string in, object out — no side effects.
+function parseDispatchEnvelope(stdoutText) {
+  const cleaned = (stdoutText || '').replace(/\nEXIT_CODE=\d+\s*$/, '').trim();
+  const lines = cleaned.split('\n').map(l => l.trim()).filter(l => l);
+  let envelope = null;
+  for (let i = lines.length - 1; i >= 0 && !envelope; i--) {
+    try {
+      const ev = JSON.parse(lines[i]);
+      if (ev && ev.type === 'result') { envelope = ev; break; }
+      if (ev && typeof ev === 'object' && 'structured_output' in ev) { envelope = ev; break; }
+    } catch (_) { /* skip non-JSON lines */ }
+  }
+  if (!envelope) {
+    let parsed = null;
+    try { parsed = JSON.parse(cleaned); } catch (_) {}
+    if (parsed) {
+      if (Array.isArray(parsed)) {
+        envelope = [...parsed].reverse().find(e => e && e.type === 'result') || parsed[parsed.length - 1] || null;
+      } else if (parsed && typeof parsed === 'object' && 'structured_output' in parsed) {
+        envelope = parsed;
+      }
+    }
+  }
+  if (!envelope || typeof envelope !== 'object' || !('structured_output' in envelope)) {
+    return { error: `claude -p envelope missing structured_output (got: ${(stdoutText || '').substring(0, 500)})` };
+  }
+  return envelope.structured_output;
 }
 
 function base64Encode(input) {
@@ -334,37 +373,11 @@ ${cmd}`,
 
   // Defensively strip the EXIT_CODE=<n> line that the bash command appends
   // to the stdout file.
-  let stdoutText = (wrapperResult.stdout || '').trim();
-  stdoutText = stdoutText.replace(/\nEXIT_CODE=\d+\s*$/, '');
-  // claude -p with --output-format stream-json emits NDJSON events (one
-  // JSON object per line). Find the last 'result' event by splitting on
-  // newlines and parsing each line. Falls back to single-object or
-  // array-of-events shape for backward compat with --output-format json.
-  let envelope = null;
-  const lines = stdoutText.split('\n').map(l => l.trim()).filter(l => l);
-  for (let i = lines.length - 1; i >= 0 && !envelope; i--) {
-    try {
-      const ev = JSON.parse(lines[i]);
-      if (ev && ev.type === 'result') { envelope = ev; break; }
-      if (ev && 'structured_output' in ev) { envelope = ev; break; }
-    } catch {}
+  const parsed = parseDispatchEnvelope(wrapperResult.stdout || '');
+  if (parsed && parsed.error) {
+    return parsed;
   }
-  if (!envelope) {
-    // Backward compat: try parsing the whole stdout as single JSON
-    let parsed = null;
-    try { parsed = JSON.parse(stdoutText); } catch {}
-    if (parsed) {
-      if (Array.isArray(parsed)) {
-        envelope = [...parsed].reverse().find(e => e && e.type === 'result') || parsed[parsed.length - 1] || null;
-      } else if (parsed && typeof parsed === 'object' && 'structured_output' in parsed) {
-        envelope = parsed;
-      }
-    }
-  }
-  if (!envelope || typeof envelope !== 'object' || !('structured_output' in envelope)) {
-    return { error: `claude -p envelope missing structured_output (got: ${stdoutText.substring(0, 500)})` };
-  }
-  return envelope.structured_output;
+  return parsed;
 }
 
 // ============================================================================
@@ -418,13 +431,14 @@ STEPS:
    Command: \`git -C repoRoot worktree add <worktreePath> <storyBranch>\`.
 7. Sync sprint-status INSIDE the story worktree (it's a tracked file; commit goes onto storyBranch):
    cd <worktreePath>
+   - Read development_status[<storyKey>] BEFORE updating — store as currentStatus. This is the dispatch-gate value: JS-side shouldAcceptStoryStatus() will halt the run if the status is not backlog / ready-for-dev / in-progress / review. If currentStatus is already 'done', 'awaiting-operator', 'blocked', or any unknown value, do NOT proceed with the sync — return the currentStatus as-is and abort with an error in storyKey (the JS guard will catch it).
    - Update development_status[<storyKey>] = in-progress
    - Find epic-{N} where N = first numeric segment of <storyKey>. Set to in-progress if currently backlog.
    - Update last_updated to "${timestamp}"
    - git add + commit -m "chore(sprint-status): story <storyKey> → in-progress"
    - DO push this commit (so MR create phase has something to point at): \`git push origin \${storyBranch}\` (use --force-with-lease if local is ahead).
 8. (NO spec edit here.) bmad-build-auto owns the spec lifecycle — its step-02-plan creates the spec at specPath from spec-template.md and manages status transitions. The setup agent only owns worktree + branch + sprint-status. SpecPath is computed and returned in SETUP_SCHEMA but the file is NOT touched at this stage. (bmad-build-auto will create it during the Build phase and overwrite any stub; a stub here would be wasted work + confuse the resume check in step-02-plan.)
-9. Return SETUP_SCHEMA JSON with ALL fields filled. The other phases depend on these — incomplete context = broken workflow.
+9. Return SETUP_SCHEMA JSON with ALL fields filled (including currentStatus from step 7). The other phases depend on these — incomplete context = broken workflow.
 
 CONSTRAINTS:
 - DO NOT modify prdWorktreePath (the PRD worktree). Only create the story worktree.
@@ -439,6 +453,21 @@ if (!setup || !setup.worktreePath) {
 }
 log(`Repo: ${setup.repoRoot} | PRD worktree: ${setup.prdWorktreePath} | prdKey: ${setup.prdKey}`)
 log(`Story branch: ${setup.storyBranch} | Worktree: ${setup.worktreePath} | Baseline: ${setup.baselineSha}`)
+
+// Status gate: setup agent reports the story's current sprint-status. We accept
+// only backlog (no spec yet — bmad-build-auto creates it during Build),
+// ready-for-dev (spec committed), in-progress (resume case), and review
+// (re-attempting after review). Terminal/deferred statuses (done, awaiting-
+// operator, blocked) + unknown values halt the dispatch — pure guard via
+// shouldAcceptStoryStatus(), not relying on the agent's LLM-applied decision.
+if (!shouldAcceptStoryStatus(setup.currentStatus)) {
+  return {
+    aborted: true,
+    stage: 'setup',
+    storyKey,
+    error: `story '${storyKey}' has unacceptable status '${setup.currentStatus}' — must be one of backlog | ready-for-dev | in-progress | review`,
+  }
+}
 
 // ============================================================================
 // PHASE 2: CREATE MR (runs ONCE, before Build loop)
@@ -471,7 +500,7 @@ STEPS:
    - IF ${relSpecPath} exists (post-build MR creation OR a pre-existing spec): copy it
      \`cp "${relSpecPath}" /tmp/bmad-mr-desc-${setup.storyKey}.md\`
    - IF ${relSpecPath} does NOT exist (normal case: spec created by bmad-build-auto during Build, not yet at MR-create time): write a placeholder
-     Write /tmp/bmad-mr-desc-${setup.storyKey}.md with content from `formatMRDescriptionPlaceholder(setup.storyKey)` (pure helper, tested in test/pure.test.mjs).
+     Write /tmp/bmad-mr-desc-${setup.storyKey}.md with content from formatMRDescriptionPlaceholder(setup.storyKey) (pure helper, tested in test/pure.test.mjs).
    mrDescFile = /tmp/bmad-mr-desc-${setup.storyKey}.md
 2. Invoke MR create via the Skill (wraps atomic find-or-create; soft-fail: if Skill errors, capture error and return without mrIid):
    BMAD_MR_ACTION=ensure-mr \\

@@ -371,8 +371,15 @@ const buildPlanState = () => ({
 // re-prompts the dep-inference confirmation that was already given.
 if (userChoice) {
   // Use pure helper to apply the operator's userChoice (test/pure.test.mjs).
+  // `halt` from the helper is the single source of truth for whether this
+  // resume ends the run (currently only abort_prd halts, but new halting
+  // userChoices can extend the helper's switch without touching this wrapper).
   const { planResult: newPR, halt } = applyUserChoice(planResult, userChoice, confirmedDeps);
   planResult.inferred = newPR.inferred;
+  if (halt) {
+    log(`Halting per userChoice=${userChoice}`);
+    return { aborted: true, haltReason: 'aborted', timestamp, runDir };
+  }
   if (userChoice === 'confirm_deps') {
     log(confirmedDeps
       ? `Resuming with confirm_deps (+ edited confirmedDeps entries: ${Array.isArray(confirmedDeps) ? confirmedDeps.length : Object.keys(confirmedDeps).length})`
@@ -382,9 +389,6 @@ if (userChoice) {
   } else if (userChoice === 'proceed_without_inference') {
     log(`Resuming with proceed_without_inference (clearing inferred graph)`);
     await writeState(buildPlanState());
-  } else if (userChoice === 'abort_prd') {
-    log(`Aborting per userChoice=abort_prd`);
-    return { aborted: true, haltReason: 'aborted', timestamp, runDir };
   } else {
     log(`WARNING: unrecognized userChoice=${userChoice}; falling through to Phase 3`);
     await writeState(buildPlanState());
@@ -393,24 +397,20 @@ if (userChoice) {
   // Resume token without userChoice → re-halt with current state
   log(`Resume token provided but no userChoice; re-halting`)
   await writeState(buildPlanState())
-  return {
-    haltReason: 'dep_inference_confirm',
-    context: { inferred: planResult.inferred, storyQueue: planResult.storyQueue },
-    resumeToken: timestamp,
-    runDir,
-    userOptions: ['confirm_deps', 'proceed_without_inference', 'abort_prd'],
-  }
+  return buildHaltContext(
+    'dep_inference_confirm',
+    { inferred: planResult.inferred, storyQueue: planResult.storyQueue },
+    timestamp, runDir, ['confirm_deps', 'proceed_without_inference', 'abort_prd']
+  )
 } else if (inferDeps && !noInfer && !autoAcceptDeps && planResult.inferred.length > 0) {
   // First-run halt to confirm inferred graph
   log('Halting to confirm inferred dependency graph...')
   await writeState(buildPlanState())
-  return {
-    haltReason: 'dep_inference_confirm',
-    context: { inferred: planResult.inferred, storyQueue: planResult.storyQueue },
-    resumeToken: timestamp,
-    runDir,
-    userOptions: ['confirm_deps', 'proceed_without_inference', 'abort_prd'],
-  }
+  return buildHaltContext(
+    'dep_inference_confirm',
+    { inferred: planResult.inferred, storyQueue: planResult.storyQueue },
+    timestamp, runDir, ['confirm_deps', 'proceed_without_inference', 'abort_prd']
+  )
 } else {
   // No inferred deps — persist and fall through to Phase 3
   log('No inferred deps — persisting state and falling through to Phase 3')
@@ -657,13 +657,7 @@ STEPS:
       state.halts.push({ reason: 'fix_then_resume_push_failed', iteration: state.iterationCount, details: resetResult.error || null });
       await writeState(state);
       await appendJournal({ event: 'halt_fix_then_resume_push', error: resetResult.error || 'unknown' });
-      return {
-        haltReason: 'fix_then_resume_push_failed',
-        context: { resetResult, completed: state.completed, blocked: state.blocked, runDir },
-        resumeToken: timestamp,
-        runDir,
-        userOptions: ['continue', 'retry_blocked', 'abort_prd'],
-      };
+      return buildHaltContext('fix_then_resume_push_failed', { resetResult, completed: state.completed, blocked: state.blocked, runDir }, timestamp, runDir, ['continue', 'retry_blocked', 'abort_prd']);
     }
 
     // SHA-VERIFY: confirm remote prd branch tip matches the commit the reset
@@ -690,13 +684,7 @@ Return JSON: { remoteSha: <exact stdout string>, exitCode: <integer> }. Do NOT m
       state.halts.push({ reason: 'fix_then_resume_sha_verify_failed', iteration: state.iterationCount, details: { localSha: resetResult.commitSha, remoteSha: shaVerify.remoteSha, exitCode: shaVerify.exitCode } });
       await writeState(state);
       await appendJournal({ event: 'halt_fix_then_resume_sha_verify', localSha: resetResult.commitSha, remoteSha: shaVerify.remoteSha });
-      return {
-        haltReason: 'fix_then_resume_sha_verify_failed',
-        context: { resetResult, shaVerify, runDir },
-        resumeToken: timestamp,
-        runDir,
-        userOptions: ['continue', 'retry_blocked', 'abort_prd'],
-      };
+      return buildHaltContext('fix_then_resume_sha_verify_failed', { resetResult, shaVerify, runDir }, timestamp, runDir, ['continue', 'retry_blocked', 'abort_prd']);
     }
     log(`fix_then_resume: ${resetResult.reset.length} story(ies) reset, remote SHA ${shaVerify.remoteSha.substring(0, 7)} verified`)
   } else {
@@ -1058,13 +1046,7 @@ where <epicKey> entries are the epics whose retro key is NOT 'done' (i.e., the r
     log(`Halting for retro approval: ${retrosNeeded.length} epic(s) ready for retrospective...`)
     await writeState(state);
     await appendJournal({ event: 'halt_epic_retro', epics: retrosNeeded });
-    return {
-      haltReason: 'epic_retro',
-      context: { retrosNeeded, completed: state.completed, blocked: state.blocked, runDir },
-      resumeToken: timestamp,
-      runDir,
-      userOptions: ['proceed_retro', 'skip_retro', 'abort_prd'],
-    };
+    return buildHaltContext('epic_retro', { retrosNeeded, completed: state.completed, blocked: state.blocked, runDir }, timestamp, runDir, ['proceed_retro', 'skip_retro', 'abort_prd']);
   } else if (userChoice === 'skip_retro') {
     log('Retro skipped per userChoice')
     await appendJournal({ event: 'phase4_retro_skip', reason: 'user_choice', epics: retrosNeeded });
