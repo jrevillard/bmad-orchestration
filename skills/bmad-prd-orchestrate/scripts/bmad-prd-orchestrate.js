@@ -352,7 +352,7 @@ STATE_EOF
 ) && DEPS_CONTENT=$(cat <<'DEPS_EOF'
 ${JSON.stringify(depsContent, null, 2)}
 DEPS_EOF
-) && STATE_FILE=/tmp/bmad-orch-state-$$.json && DEPS_FILE=/tmp/bmad-orch-deps-$$.json && printf '%s' "$STATE_CONTENT" > "$STATE_FILE" && printf '%s' "$DEPS_CONTENT" > "$DEPS_FILE" && "${setup.prdWorktreePath}/.claude/scripts/write-state.sh" '${runDir}' "$STATE_FILE" "$DEPS_FILE" && rm -f "$STATE_FILE" "$DEPS_FILE"`;
+) && STATE_FILE=/tmp/bmad-orch-state-$$.json && DEPS_FILE=/tmp/bmad-orch-deps-$$.json && printf '%s' "$STATE_CONTENT" > "$STATE_FILE" && printf '%s' "$DEPS_CONTENT" > "$DEPS_FILE" && "${args_.helpersDir || ""}write-state.sh" '${runDir}' "$STATE_FILE" "$DEPS_FILE" && rm -f "$STATE_FILE" "$DEPS_FILE"`;
   return await agent(
     `Run this exact bash command. Return its stdout verbatim. Do NOT modify, summarize, or diagnose.
 
