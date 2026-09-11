@@ -13,6 +13,13 @@ export const meta = {
 
 const main = async () => {
 
+// Per-script counter for unique temp filenames. Hoisted to top of main() so the
+// let is initialized BEFORE Phase 2's first writeState call (line ~285). Functions
+// hoist, but `let` does not — declaring writeStateCallSeq inside the function body
+// AFTER first use would TDZ-fail (ReferenceError). Workflow tool forbids Date.now()
+// and Math.random() (break resume), so a simple increment is the only option.
+let writeStateCallSeq = 0;
+
 const args_ = args || {};
 const storyKey = args_.storyKey || null;
 const epicKey = args_.epicKey || null;
@@ -344,10 +351,6 @@ let state = {
 }
 
 // State persistence helpers (Phase 3 owns these; Task 2 inlined a parallel helper for plan-time).
-// Per-script counter for unique temp filenames. Workflow tool forbids Date.now()
-// and Math.random() (break resume), so use a simple increment like build-converge.
-let writeStateCallSeq = 0;
-
 // Declared as function declarations so they hoist — Phase 2 already calls writeState
 // before this source position executes (TDZ on `const` would otherwise throw).
 async function writeState(stateObj) {
