@@ -56,10 +56,14 @@ const SETUP_SCHEMA = {
     specPath: { type: 'string' },
     gitlabHost: { type: 'string' },
     prdBranch: { type: 'string' },
+    // mrRepo = host + '/' + project from issue-tracking.yaml. Constructed by
+    // SETUP agent so downstream phases (mr-create) don't have to re-parse the
+    // config or re-read it from disk. Used as BMAD_MR_REPO for Skill: bmad-issue-tracking-sync.
+    mrRepo: { type: 'string' },
   },
   required: ['storyKey', 'repoRoot', 'prdWorktreePath', 'prdKey', 'baseBranch', 'storyBranch',
              'worktreePath', 'baselineSha', 'resumedFromBranch', 'sprintStatusUpdated',
-             'sprintStatusPath', 'specPath', 'gitlabHost', 'prdBranch'],
+             'sprintStatusPath', 'specPath', 'gitlabHost', 'prdBranch', 'mrRepo'],
 };
 
 const BUILD_SCHEMA = {
@@ -333,6 +337,7 @@ STEPS:
       - branch_patterns.prd: "feat/{prd_key}/prd"
       - branch_patterns.story: "feat/{prd_key}/{story_key}"
    b. Verify prdKey from step 1b matches the project's git remote: \`git -C repoRoot remote -v\`. The remote URL host should match config host.
+   c. Construct mrRepo = host + '/' + project (e.g. opensource.unicc.org/un/itu/genie-ai). This is the value the Skill: bmad-issue-tracking-sync expects in BMAD_MR_REPO. Return it as mrRepo in SETUP_SCHEMA so downstream phases (mr-create) can use it directly.
 3. baseBranch = worktree_base-style interpolation: feat/<prd_key>/prd (matches the existing PRD branch you found).
 4. Confirm story is ready:
    a. sprintStatusPath = prdWorktreePath + '/_bmad-output/implementation-artifacts/sprint-status.yaml'.
@@ -410,22 +415,31 @@ CONTEXT (from setup agent):
 - baseBranch: ${setup.baseBranch}
 - storyBranch: ${setup.storyBranch}
 - worktreePath: ${setup.worktreePath}
+- mrRepo: ${setup.mrRepo}  (host/project from _bmad/custom/issue-tracking.yaml — pass as-is to BMAD_MR_REPO)
 
 OPERATE FROM: ${setup.worktreePath}
 
 STEPS:
-1. Read config: \`_bmad/custom/issue-tracking.yaml\` project field = configProject (full repo path, e.g. un/itu/genie-ai).
-2. Invoke MR create via the Skill (wraps atomic find-or-create; soft-fail: if Skill errors, capture error and return without mrIid):
+1. Invoke MR create via the Skill (wraps atomic find-or-create; soft-fail: if Skill errors, capture error and return without mrIid):
    BMAD_MR_ACTION=ensure-mr \\
    BMAD_MR_SOURCE_BRANCH="${setup.storyBranch}" \\
    BMAD_MR_TARGET_BRANCH="${setup.baseBranch}" \\
    BMAD_MR_TITLE="Story ${setup.storyKey} — bmad-build-converge" \\
    BMAD_MR_DESCRIPTION_FILE="${relSpecPath}" \\
-   BMAD_MR_REPO="${configProject}" \
-       Skill: bmad-issue-tracking
-   Capture { mr_iid, mr_url } from the Skill's stdout return.
-3. Fetch first pipeline id: BMAD_MR_ACTION=get-mr-pipeline BMAD_MR_IID=<captured mr_iid> Skill: bmad-issue-tracking. Capture { pipeline_id, pipeline_status }.
-4. If either Skill call soft-fails (no mr_iid / pipeline_id), return early with the error string set (NEVER halt the build — Phase 2 fallback is to skip MR creation).
+   BMAD_MR_REPO="${setup.mrRepo}" \
+       Skill: bmad-issue-tracking-sync
+   Note: ensure-mr does NOT return mr_iid (per common/ensure-mr.yaml header — "Output variables: (none — call common/find-mr after to resolve mr_iid if needed)"). Capture { mr_url } only.
+2. Resolve mr_iid via find-mr (mandatory because ensure-mr doesn't return it):
+   BMAD_MR_ACTION=find-mr \\
+   BMAD_MR_SOURCE_BRANCH="${setup.storyBranch}" \\
+   BMAD_MR_REPO="${setup.mrRepo}" \
+       Skill: bmad-issue-tracking-sync
+   Capture { mr_iid } from the Skill's stdout return. If mr_iid is empty (find-mr found nothing — should not happen post-ensure-mr), set mrIid=0 and mrResult.error="find-mr returned no mr_iid after ensure-mr".
+3. After the ensure-mr Skill returns: rm -f "${relSpecPath}" as BMAD_MR_DESCRIPTION_FILE cleanup (per SKILL.md "Cleanup: the Skill caller's agent does rm -f on BMAD_MR_DESCRIPTION_FILE after Skill returns"; best-effort — swallow errors).
+4. Fetch first pipeline id (RACE-AWARE: push may not have triggered a pipeline yet; pipeline_id may be empty):
+   BMAD_MR_ACTION=get-mr-pipeline BMAD_MR_IID=<captured mr_iid> Skill: bmad-issue-tracking-sync.
+   Capture { pipeline_id, pipeline_status }. If pipeline_id is empty, treat as "no pipeline yet" — set pipelineId=0 and pipelineStatus="none" (the CI loop will pick up the real pipeline when it polls).
+5. If any Skill call soft-fails (no mr_iid returned, OR ensure-mr error), return early with the error string set (NEVER halt the build — Phase 2 fallback is to skip MR creation).
 
 RETURN JSON: { storyKey: ${setup.storyKey}, mrIid: <mr_iid>, mrUrl: <mr_url>, pipelineId: <pipeline_id>, branch: ${setup.storyBranch}, error? }
 
@@ -631,12 +645,12 @@ while (ciIter < ciMaxIterations) {
 MR was created in Phase 2 — guaranteed to exist. Use MR pipeline only.
 
 STEPS:
-1. Get latest MR pipeline: BMAD_MR_ACTION=get-mr-pipeline BMAD_MR_IID=${mrResult.mrIid} Skill: bmad-issue-tracking. Capture { pipeline_id, pipeline_status }.
+1. Get latest MR pipeline: BMAD_MR_ACTION=get-mr-pipeline BMAD_MR_IID=${mrResult.mrIid} Skill: bmad-issue-tracking-sync. Capture { pipeline_id, pipeline_status }.
 2. Poll status: \`Bash(command="${args.helpersDir}ci-monitor.sh <pipelineId> 30", run_in_background=true)\` + \`TaskOutput(block=true, timeout=1800000)\`. Read the "TERMINAL:<status>" line.
 3. If status='success': return { pipelineId, status: 'success' }.
 4. If status != 'success': classify failure.
-   - BMAD_MR_ACTION=get-failed-jobs BMAD_PIPELINE_ID=<pipeline_id> Skill: bmad-issue-tracking.
-   - Capture { jobs } (newline-separated JSON; each line is {name, exitCode, trace_tail}).
+   - BMAD_MR_ACTION=get-failed-jobs BMAD_PIPELINE_ID=<pipeline_id> Skill: bmad-issue-tracking-sync.
+   - Capture { jobs } (newline-separated TSV per common/get-failed-jobs.yaml header — each line is "name<TAB>exit_code<TAB>trace_tail"; note snake_case exit_code field, NOT camelCase exitCode).
    - Transform into failedJobs=[{name, exitCode, excerpt: trace_tail}] + traceTail=concatenated trace_tails (best-effort).
 5. Return JSON: { pipelineId, status, failedJobs: [{name, exitCode, excerpt}], traceTail: <concatenated excerpts> }`,
     { label: `ci-check-${ciIter}`, phase: 'Build with convergence', schema: {
@@ -819,12 +833,11 @@ CONTEXT:
 - prdWorktreePath: ${setup.prdWorktreePath}  (worktree on ${setup.baseBranch} — operate from here for sprint-status)
 - sprintStatusPath: ${setup.sprintStatusPath}
 - baseBranch: ${setup.baseBranch}
-- gitlabHost: ${setup.gitlabHost}
-- project: <from _bmad/custom/issue-tracking.yaml>
+- mrRepo: ${setup.mrRepo}  (host/project from _bmad/custom/issue-tracking.yaml — the Skill routing uses this, NOT gitlabHost)
 - storyKey: ${setup.storyKey}
 
 STEPS:
-1. Merge: BMAD_MR_ACTION=merge-mr BMAD_MR_IID=${mrResult.mrIid} BMAD_MR_SQUASH=false Skill: bmad-issue-tracking.
+1. Merge: BMAD_MR_ACTION=merge-mr BMAD_MR_IID=${mrResult.mrIid} BMAD_MR_SQUASH=false Skill: bmad-issue-tracking-sync.
    Capture { merged, merge_sha, error }. If merged=false, set merged=false with error string.
 2. After successful merge, sync sprint-status to done. Operate from the PRD worktree (${setup.prdWorktreePath}).
    - cd ${setup.prdWorktreePath}
