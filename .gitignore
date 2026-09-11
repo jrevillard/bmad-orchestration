@@ -1,0 +1,14 @@
+# BMad runtime (consumer install artifact + run dirs)
+_bmad/
+_bmad-output/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
