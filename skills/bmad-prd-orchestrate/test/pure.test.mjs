@@ -233,3 +233,39 @@ test('requeueCIHardfails ignores non-ci_hardfail halts', () => {
   assert.equal(count, 0);
   assert.equal(out.storyQueue.length, 0);
 });
+
+// ============================================================================
+// isEpicTransition(lastEpic, currentEpic) → boolean
+// Returns true if the current epic differs from the previous one (caller has
+// already been tracking lastEpic). Returns true on first iteration when
+// lastEpic=null (transition from "(start)"). Pure: just a comparison.
+// ============================================================================
+
+test('isEpicTransition returns true on first iteration (lastEpic=null)', () => {
+  const fn = extractFunction(source, 'isEpicTransition');
+  assert.equal(fn(null, '1'), true);
+  assert.equal(fn(null, '4-1-a'), true);
+});
+
+test('isEpicTransition returns false within same epic', () => {
+  const fn = extractFunction(source, 'isEpicTransition');
+  const extractEpicKey = extractFunction(source, 'extractEpicKey');
+  // Function takes pre-extracted epics (matches orchestrator usage).
+  assert.equal(fn(extractEpicKey('1-1'), extractEpicKey('1-2-foo')), false);
+  assert.equal(fn(extractEpicKey('4-1'), extractEpicKey('4-3-b')), false);
+});
+
+test('isEpicTransition returns true on epic change', () => {
+  const fn = extractFunction(source, 'isEpicTransition');
+  const extractEpicKey = extractFunction(source, 'extractEpicKey');
+  assert.equal(fn(extractEpicKey('1-3'), extractEpicKey('2-1')), true);
+  assert.equal(fn(extractEpicKey('4-1-a'), extractEpicKey('5-1')), true);
+});
+
+test('isEpicTransition is purely boolean (no side effects)', () => {
+  const fn = extractFunction(source, 'isEpicTransition');
+  const a = fn('1', '2-1');
+  const b = fn('1', '2-1');
+  assert.equal(a, b);
+  assert.equal(typeof a, 'boolean');
+});

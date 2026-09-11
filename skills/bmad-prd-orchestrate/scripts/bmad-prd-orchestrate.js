@@ -35,6 +35,13 @@ function extractEpicKey(sk) {
   return (sk.split('-')[0]) || sk;
 }
 
+// isEpicTransition(lastEpic, currentEpic) → true when currentEpic differs from
+// lastEpic (including first iteration where lastEpic=null → "(start)"). Pure
+// comparison — no side effects.
+function isEpicTransition(lastEpic, currentEpic) {
+  return lastEpic !== currentEpic;
+}
+
 const args_ = args || {};
 const storyKey = args_.storyKey || null;
 const epicKey = args_.epicKey || null;
@@ -646,7 +653,7 @@ while (state.storyQueue.length > 0) {
   //   `<epicNum>-<storyNum>[-<suffix>]` (e.g. `1-3-login-form`, optional letter suffix `4-1-a` per local spec L186).
   // Epic = first dash-separated segment. storyQueue is in epic-order (L197-198), so
   // consecutive stories only share an epic when they belong to the same epic. First story sets the baseline (no halt).
-  const currentEpic = (sk.split('-')[0]) || sk;
+  const currentEpic = extractEpicKey(sk);
   if (lastEpic !== currentEpic) {
     log(`Epic transition: ${lastEpic || '(start)'} → ${currentEpic} — marking epic as in-progress via bmad-issue-tracking-sync`)
     // Mark the new epic as in-progress on the issue tracker. First iteration
