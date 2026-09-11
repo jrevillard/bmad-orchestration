@@ -114,6 +114,23 @@ const CLEANUP_SCHEMA = {
 // ============================================================================
 // base64Encode: pure-JS UTF-8 → base64 (workflow scripts lack Buffer + btoa).
 // ============================================================================
+
+// toRepoRelativePath(specPath, worktreePath, repoRoot) → string
+// Strips the worktree path prefix (preferred) or repo root prefix (fallback)
+// from specPath to produce a portable, repo-root-relative path for the MR
+// description. Pure: string manipulation, no side effects.
+function toRepoRelativePath(specPath, worktreePath, repoRoot) {
+  const wtPrefix = (worktreePath || '') + '/';
+  if (specPath && specPath.startsWith(wtPrefix)) {
+    return specPath.slice(wtPrefix.length);
+  }
+  const repoPrefix = (repoRoot || '') + '/';
+  if (specPath && specPath.startsWith(repoPrefix)) {
+    return specPath.slice(repoPrefix.length);
+  }
+  return specPath || '';
+}
+
 function base64Encode(input) {
   const bytes = [];
   for (let i = 0; i < input.length; i++) {
@@ -394,14 +411,9 @@ phase('Create MR')
 log(`Creating MR for ${setup.storyBranch}...`)
 // Compute spec path relative to repo root for the MR description (portable
 // for reviewers, not a local laptop path). The spec file is committed to
-// the branch at _bmad-output/... — strip the worktree prefix.
-let relSpecPath = setup.specPath;
-const wtPrefix = setup.worktreePath + '/';
-if (relSpecPath.startsWith(wtPrefix)) {
-  relSpecPath = relSpecPath.slice(wtPrefix.length);
-} else if (relSpecPath.startsWith(setup.repoRoot + '/')) {
-  relSpecPath = relSpecPath.slice(setup.repoRoot.length + 1);
-}
+// the branch at _bmad-output/... — strip the worktree prefix (or repo
+// root as fallback). Uses extracted pure helper (test/pure.test.mjs).
+let relSpecPath = toRepoRelativePath(setup.specPath, setup.worktreePath, setup.repoRoot);
 const mrResult = await agent(
   `Create MR for branch ${setup.storyBranch} → ${setup.baseBranch}, story ${setup.storyKey}.
 
