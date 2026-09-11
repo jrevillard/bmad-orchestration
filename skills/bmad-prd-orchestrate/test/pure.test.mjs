@@ -344,6 +344,50 @@ test('parseMaxRetries rejects negative numbers (treated as default)', () => {
 });
 
 // ============================================================================
+// buildHaltContext(reason, details, story, iterationCount, userOptions, extras)
+// Returns the standard halt payload the orchestrator returns to the Workflow
+// runtime. Shape:
+//   { haltReason, context, resumeToken, runDir, userOptions }
+// Used by launch_failure, ci_hardfail, merge_blocked, merge_conflict, etc.
+// Pure: object builder, no side effects.
+// ============================================================================
+
+test('buildHaltContext returns standard halt shape', () => {
+  const fn = extractFunction(source, 'buildHaltContext');
+  const out = fn('test_reason', { foo: 'bar' }, 'rt-123', '/run/dir', ['continue']);
+  assert.equal(out.haltReason, 'test_reason');
+  assert.deepEqual({...out.context}, { foo: 'bar' });
+  assert.equal(out.resumeToken, 'rt-123');
+  assert.equal(out.runDir, '/run/dir');
+  assert.deepEqual([...out.userOptions], ['continue']);
+});
+
+test('buildHaltContext defaults userOptions to standard resume set', () => {
+  const fn = extractFunction(source, 'buildHaltContext');
+  const out = fn('launch_failure', { story: '1-1' }, 'rt', '/run');
+  // No userOptions arg → default list (continue, retry_blocked, skip_blocked, abort_prd, fix_then_resume).
+  assert.ok(Array.isArray(out.userOptions));
+  assert.ok(out.userOptions.includes('continue'));
+  assert.ok(out.userOptions.includes('retry_blocked'));
+  assert.ok(out.userOptions.includes('skip_blocked'));
+  assert.ok(out.userOptions.includes('abort_prd'));
+  assert.ok(out.userOptions.includes('fix_then_resume'));
+});
+
+test('buildHaltContext defaults context to empty object', () => {
+  const fn = extractFunction(source, 'buildHaltContext');
+  const out = fn('epic_boundary', null, 'rt', '/run', ['continue']);
+  assert.deepEqual({...out.context}, {});
+});
+
+test('buildHaltContext preserves custom userOptions', () => {
+  const fn = extractFunction(source, 'buildHaltContext');
+  // Custom userOptions (e.g. dep_inference_confirm has its own list).
+  const out = fn('dep_inference_confirm', {}, 'rt', '/run', ['confirm_deps', 'proceed_without_inference', 'abort_prd']);
+  assert.deepEqual([...out.userOptions], ['confirm_deps', 'proceed_without_inference', 'abort_prd']);
+});
+
+// ============================================================================
 // findUnmetDeps(deps, depStatuses) → string[]
 // Returns the subset of `deps` whose status in `depStatuses` is NOT 'done'.
 // A dep is "met" when sprint-status reports it 'done' (sprint-status is the

@@ -51,6 +51,21 @@ function shouldHaltAtEpicTransition(hitlEveryEpic, lastEpic, currentEpic) {
   return hitlEveryEpic && lastEpic !== null && currentEpic !== lastEpic;
 }
 
+// buildHaltContext(reason, context, resumeToken, runDir, userOptions) → object
+// Standard halt payload returned to the Workflow runtime at every halt site.
+// Pure: object builder, no side effects. The wrapper caller (the actual
+// halt site in the loop) still does the state.halts.push + writeState +
+// appendJournal before returning this payload.
+function buildHaltContext(reason, context, resumeToken, runDir, userOptions) {
+  return {
+    haltReason: reason,
+    context: context || {},
+    resumeToken,
+    runDir,
+    userOptions: userOptions || ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
+  };
+}
+
 // findUnmetDeps(deps, depStatuses) → array of deps whose status is not 'done'.
 // A dep is "met" when sprint-status reports it 'done'. Sprint-status is the
 // ground truth across all runs (state.completed is this-run-only — cross-run
@@ -740,13 +755,11 @@ Capture { issue_id } from stdout. If the Skill reports the issue was not found, 
     state.halts.push({ reason: 'epic_boundary', iteration: state.iterationCount, details: { from: lastEpic, to: currentEpic } });
     await writeState(state);
     await appendJournal({ event: 'halt_epic_boundary', iteration: state.iterationCount, from: lastEpic, to: currentEpic });
-    return {
-      haltReason: 'epic_boundary',
-      context: { from: lastEpic, to: currentEpic, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
-      resumeToken: timestamp,
-      runDir,
-      userOptions: ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
-    };
+    return buildHaltContext(
+      'epic_boundary',
+      { from: lastEpic, to: currentEpic, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
+      timestamp, runDir
+    );
   }
   lastEpic = currentEpic;
 
@@ -839,13 +852,11 @@ ${bashReadCmd}`,
     state.halts.push({ reason: 'launch_failure', story: sk, iteration: state.iterationCount, details: launchError });
     await writeState(state);
     await appendJournal({ event: 'halt_launch_failure', storyKey: sk, iteration: state.iterationCount, error: launchError });
-    return {
-      haltReason: 'launch_failure',
-      context: { story: sk, error: launchError, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
-      resumeToken: timestamp,
-      runDir,
-      userOptions: ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
-    };
+    return buildHaltContext(
+      'launch_failure',
+      { story: sk, error: launchError, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
+      timestamp, runDir
+    );
   }
 
   // MR-creation failure: the converge sub-workflow returns converged:true with
@@ -860,13 +871,11 @@ ${bashReadCmd}`,
     state.storyQueue.shift();
     await writeState(state);
     await appendJournal({ event: 'halt_merge_conflict', storyKey: sk, iteration: state.iterationCount, details: String(convergeResult.aborted) });
-    return {
-      haltReason: 'merge_conflict',
-      context: { story: sk, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator, details: String(convergeResult.aborted) },
-      resumeToken: timestamp,
-      runDir,
-      userOptions: ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
-    };
+    return buildHaltContext(
+      'merge_conflict',
+      { story: sk, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator, details: String(convergeResult.aborted) },
+      timestamp, runDir
+    );
   }
 
   // CI hard-fail: converge returns converged:true even when CI failed (its
@@ -883,13 +892,11 @@ ${bashReadCmd}`,
     state.storyQueue.shift();
     await writeState(state);
     await appendJournal({ event: 'halt_ci_hardfail', storyKey: sk, iteration: state.iterationCount, ciStatus });
-    return {
-      haltReason: 'ci_hardfail',
-      context: { story: sk, ciStatus, failedJobs: convergeResult.monitor.failedJobs, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
-      resumeToken: timestamp,
-      runDir,
-      userOptions: ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
-    };
+    return buildHaltContext(
+      'ci_hardfail',
+      { story: sk, ciStatus, failedJobs: convergeResult.monitor.failedJobs, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
+      timestamp, runDir
+    );
   }
   if (mergeBlocked) {
     log(`Merge blocked for ${sk}: ${convergeResult.merge.error || 'unknown'}`)
@@ -898,13 +905,11 @@ ${bashReadCmd}`,
     state.storyQueue.shift();
     await writeState(state);
     await appendJournal({ event: 'halt_merge_blocked', storyKey: sk, iteration: state.iterationCount, error: convergeResult.merge.error });
-    return {
-      haltReason: 'merge_blocked',
-      context: { story: sk, error: convergeResult.merge.error, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
-      resumeToken: timestamp,
-      runDir,
-      userOptions: ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
-    };
+    return buildHaltContext(
+      'merge_blocked',
+      { story: sk, error: convergeResult.merge.error, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
+      timestamp, runDir
+    );
   }
 
   // Apply result
@@ -926,13 +931,11 @@ ${bashReadCmd}`,
     state.halts.push({ reason: 'periodic_review', iteration: state.iterationCount });
     await writeState(state);
     await appendJournal({ event: 'halt_periodic', iteration: state.iterationCount });
-    return {
-      haltReason: 'periodic_review',
-      context: { completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
-      resumeToken: timestamp,
-      runDir,
-      userOptions: ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
-    };
+    return buildHaltContext(
+      'periodic_review',
+      { completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
+      timestamp, runDir
+    );
   }
 }
 
