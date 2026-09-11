@@ -344,6 +344,80 @@ test('parseMaxRetries rejects negative numbers (treated as default)', () => {
 });
 
 // ============================================================================
+// removeFromState(state, storyKey) → state
+// Removes a storyKey from state.blocked and state.halts. Used when a story
+// converges or is otherwise resolved — keeps state consistent (converged
+// story shouldn't still appear as blocked). Pure: returns new state object.
+// ============================================================================
+
+test('removeFromState drops story from blocked array', () => {
+  const fn = extractFunction(source, 'removeFromState');
+  const state = {
+    blocked: [
+      { story: '1-1', reason: 'launch_failure' },
+      { story: '1-2', reason: 'ci_hardfail' },
+    ],
+    halts: [],
+  };
+  const out = fn(state, '1-1');
+  assert.equal(out.blocked.length, 1);
+  assert.equal(out.blocked[0].story, '1-2');
+});
+
+test('removeFromState drops story from halts array', () => {
+  const fn = extractFunction(source, 'removeFromState');
+  const state = {
+    blocked: [],
+    halts: [
+      { reason: 'launch_failure', story: '1-1', iteration: 1 },
+      { reason: 'ci_hardfail', story: '1-2', iteration: 2 },
+    ],
+  };
+  const out = fn(state, '1-1');
+  assert.equal(out.halts.length, 1);
+  assert.equal(out.halts[0].story, '1-2');
+});
+
+test('removeFromState handles string-form blocked entries', () => {
+  const fn = extractFunction(source, 'removeFromState');
+  // Older format: blocked entries are bare strings (not objects).
+  const state = {
+    blocked: ['1-1', '1-2', '1-3'],
+    halts: [],
+  };
+  const out = fn(state, '1-2');
+  assert.deepEqual([...out.blocked], ['1-1', '1-3']);
+});
+
+test('removeFromState leaves state unchanged if story not present', () => {
+  const fn = extractFunction(source, 'removeFromState');
+  const state = {
+    blocked: [{ story: '1-1', reason: 'launch_failure' }],
+    halts: [{ reason: 'launch_failure', story: '1-1', iteration: 1 }],
+  };
+  const out = fn(state, '9-9');
+  assert.equal(out.blocked.length, 1);
+  assert.equal(out.halts.length, 1);
+});
+
+test('removeFromState preserves other state fields', () => {
+  const fn = extractFunction(source, 'removeFromState');
+  const state = {
+    storyQueue: ['1-2', '1-3'],
+    completed: ['1-0'],
+    blocked: [{ story: '1-1' }],
+    halts: [],
+    iterationCount: 5,
+  };
+  const out = fn(state, '1-1');
+  // blocked updated, everything else untouched
+  assert.equal(out.blocked.length, 0);
+  assert.deepEqual([...out.storyQueue], ['1-2', '1-3']);
+  assert.deepEqual([...out.completed], ['1-0']);
+  assert.equal(out.iterationCount, 5);
+});
+
+// ============================================================================
 // buildHaltContext(reason, details, story, iterationCount, userOptions, extras)
 // Returns the standard halt payload the orchestrator returns to the Workflow
 // runtime. Shape:

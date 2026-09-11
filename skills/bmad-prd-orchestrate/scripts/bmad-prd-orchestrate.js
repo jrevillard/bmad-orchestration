@@ -152,6 +152,22 @@ const inferDeps = args_.inferDeps !== false;  // default true
 const noInfer = args_.noInfer || false;
 const autoAcceptDeps = args_.autoAcceptDeps === true;  // run inference but skip the dep_inference_confirm halt
 const retro = args_.retro || false;
+// removeFromState(state, storyKey) → state
+// Removes a storyKey from state.blocked and state.halts (matching h.story).
+// Called when a story converges or is otherwise resolved — keeps state
+// consistent with reality (a converged story shouldn't be in blocked).
+// Pure: returns new state object.
+function removeFromState(state, storyKey) {
+  return {
+    ...state,
+    blocked: (state.blocked || []).filter(b => {
+      const bStory = typeof b === 'string' ? b : (b && b.story);
+      return bStory !== storyKey;
+    }),
+    halts: (state.halts || []).filter(h => h && h.story !== storyKey),
+  };
+}
+
 // parseMaxRetries(rawValue) → integer
 // Parses the args.maxRetries arg. Default 3. 0 = never retry. Negative or
 // unparseable → fall back to default (defensive). Pure — no Workflow globals.
@@ -832,6 +848,7 @@ ${bashReadCmd}`,
   if (currentStatus === 'done') {
     log(`Story ${sk} already done per sprint-status; marking completed`)
     state.completed.push(sk);
+    state = removeFromState(state, sk);
     state.storyQueue.shift();
     continue;
   }
@@ -945,6 +962,9 @@ ${bashReadCmd}`,
   // Apply result
   if (convergeResult.converged) {
     state.completed.push(sk);
+    // Cleanup: converged story may be stale-pending in blocked/halts from
+    // an earlier failure. removeFromState keeps state consistent with reality.
+    state = removeFromState(state, sk);
     log(`Story ${sk} converged (iter ${convergeResult.iterations}, finalSha=${(convergeResult.finalSha || '').substring(0, 7)})`)
     await appendJournal({ event: 'converged', storyKey: sk, iteration: state.iterationCount, iterations: convergeResult.iterations });
   } else {
