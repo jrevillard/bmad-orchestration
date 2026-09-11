@@ -20,6 +20,21 @@ const main = async () => {
 // and Math.random() (break resume), so a simple increment is the only option.
 let writeStateCallSeq = 0;
 
+// ============================================================================
+// Pure helpers — kept as named function declarations (not arrow consts) so the
+// test harness (test/pure.test.mjs) can extract them via vm.runInNewContext
+// and unit-test in isolation. Do not reference Workflow globals (agent, phase,
+// log, args) inside these — they're tested outside the Workflow runtime.
+// ============================================================================
+
+// extractEpicKey(sk) → first dash-separated segment of the canonical story key.
+// Format: `<epicNum>-<storyNum>[-<suffix>]` per upstream bmad-issue-tracking
+// `bmad-workflow-lang.md:451-452` (e.g. `1-3-login-form`, optional letter
+// suffix `4-1-a`). Falls back to sk itself if no dash (bare epic key or empty).
+function extractEpicKey(sk) {
+  return (sk.split('-')[0]) || sk;
+}
+
 const args_ = args || {};
 const storyKey = args_.storyKey || null;
 const epicKey = args_.epicKey || null;
