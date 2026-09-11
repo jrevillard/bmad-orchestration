@@ -95,15 +95,10 @@ test('extractEpicKey falls back to input on empty/garbage', () => {
   // maps to '' (not fallback to sk). Update test if behavior changes.
 });
 
-test('extractEpicKey is stable across runs (no Math.random / Date.now)', () => {
-  // Pure function check: same input must give same output.
-  const extractEpicKey = extractFunction(source, 'extractEpicKey');
-  const a = extractEpicKey('7-2-foo');
-  const b = extractEpicKey('7-2-foo');
-  const c = extractEpicKey('7-2-foo');
-  assert.equal(a, b);
-  assert.equal(b, c);
-  assert.equal(a, '7');
+test('extractEpicKey falls back to sk when no dash', () => {
+  const fn = extractFunction(source, 'extractEpicKey');
+  // Bare key like '1' (no dash, no suffix) → returns the key itself.
+  assert.equal(fn('1'), '1');
 });
 
 // ============================================================================
@@ -262,12 +257,12 @@ test('isEpicTransition returns true on epic change', () => {
   assert.equal(fn(extractEpicKey('4-1-a'), extractEpicKey('5-1')), true);
 });
 
-test('isEpicTransition is purely boolean (no side effects)', () => {
+test('isEpicTransition returns boolean type', () => {
   const fn = extractFunction(source, 'isEpicTransition');
-  const a = fn('1', '2-1');
-  const b = fn('1', '2-1');
-  assert.equal(a, b);
-  assert.equal(typeof a, 'boolean');
+  const extractEpicKey = extractFunction(source, 'extractEpicKey');
+  assert.equal(typeof fn(null, extractEpicKey('1-1')), 'boolean');
+  assert.equal(typeof fn(extractEpicKey('1-1'), extractEpicKey('1-2')), 'boolean');
+  assert.equal(typeof fn(extractEpicKey('1-1'), extractEpicKey('2-1')), 'boolean');
 });
 
 // ============================================================================

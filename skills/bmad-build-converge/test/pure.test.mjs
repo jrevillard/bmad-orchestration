@@ -130,14 +130,25 @@ test('toRepoRelativePath handles empty specPath', () => {
   assert.equal(fn('', '/wt', '/repo'), '');
 });
 
-test('toRepoRelativePath is purely deterministic', () => {
+test('toRepoRelativePath handles empty specPath', () => {
   const fn = extractFunction(source, 'toRepoRelativePath');
-  // Worktree '/a' does NOT match '/a/b/c.md' as a prefix (well, actually it does).
-  // Use a clear case: specPath inside worktree.
-  const a = fn('/a/_bmad/c.md', '/a', '/x');
-  const b = fn('/a/_bmad/c.md', '/a', '/x');
-  assert.equal(a, b);
-  assert.equal(a, '_bmad/c.md');
+  assert.equal(fn('', '/wt', '/repo'), '');
+});
+
+test('toRepoRelativePath handles empty specPath', () => {
+  const fn = extractFunction(source, 'toRepoRelativePath');
+  // specPath is falsy → returns '' (defensive guard at return).
+  assert.equal(fn(null, '/wt', '/repo'), '');
+  assert.equal(fn(undefined, '/wt', '/repo'), '');
+  assert.equal(fn('', '/wt', '/repo'), '');
+});
+
+test('toRepoRelativePath uses repo root when worktree is empty', () => {
+  const fn = extractFunction(source, 'toRepoRelativePath');
+  // worktreePath empty → skips worktree check, tries repo root. specPath is
+  // inside repo root → strips it. (Old buggy code returned the path unchanged;
+  // fixed to actually use the repo root fallback when worktree is unavailable.)
+  assert.equal(fn('/home/repo/_bmad/x.md', '', '/home/repo'), '_bmad/x.md');
 });
 
 // ============================================================================
@@ -160,8 +171,9 @@ test('formatMRDescriptionPlaceholder has required structure', () => {
   assert.match(out, /_bmad-output\/implementation-artifacts\/stories/);
 });
 
-test('formatMRDescriptionPlaceholder is purely deterministic', () => {
+test('formatMRDescriptionPlaceholder handles kebab-suffix story keys', () => {
   const fn = extractFunction(source, 'formatMRDescriptionPlaceholder');
-  assert.equal(fn('1-3-foo'), fn('1-3-foo'));
-  assert.notEqual(fn('1-3-foo'), fn('1-4-bar'));
+  const out = fn('3-4-automatic-department-routing');
+  assert.match(out, /Story 3-4-automatic-department-routing/);
+  assert.match(out, /3-4-automatic-department-routing\.md/);
 });

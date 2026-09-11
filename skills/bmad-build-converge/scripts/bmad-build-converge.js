@@ -120,13 +120,20 @@ const CLEANUP_SCHEMA = {
 // from specPath to produce a portable, repo-root-relative path for the MR
 // description. Pure: string manipulation, no side effects.
 function toRepoRelativePath(specPath, worktreePath, repoRoot) {
-  const wtPrefix = (worktreePath || '') + '/';
-  if (specPath && specPath.startsWith(wtPrefix)) {
-    return specPath.slice(wtPrefix.length);
+  // Only strip worktree prefix if worktreePath is a non-empty string.
+  // Otherwise wtPrefix='/' which would match the leading slash of any
+  // absolute path and slice it off.
+  if (specPath && worktreePath && typeof worktreePath === 'string' && worktreePath.length > 0) {
+    const wtPrefix = worktreePath + '/';
+    if (specPath.startsWith(wtPrefix)) {
+      return specPath.slice(wtPrefix.length);
+    }
   }
-  const repoPrefix = (repoRoot || '') + '/';
-  if (specPath && specPath.startsWith(repoPrefix)) {
-    return specPath.slice(repoPrefix.length);
+  if (specPath && repoRoot && typeof repoRoot === 'string' && repoRoot.length > 0) {
+    const repoPrefix = repoRoot + '/';
+    if (specPath.startsWith(repoPrefix)) {
+      return specPath.slice(repoPrefix.length);
+    }
   }
   return specPath || '';
 }
