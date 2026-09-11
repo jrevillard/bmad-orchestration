@@ -342,7 +342,7 @@ STEPS:
 3. baseBranch = worktree_base-style interpolation: feat/<prd_key>/prd (matches the existing PRD branch you found).
 4. Confirm story is ready:
    a. sprintStatusPath = prdWorktreePath + '/_bmad-output/implementation-artifacts/sprint-status.yaml'.
-   b. Read sprintStatusPath. Find development_status[<storyKey>]. Status MUST be 'ready-for-dev' or 'review'. If not, HALT with sprintStatusUpdated:false.
+   b. Read sprintStatusPath. Find development_status[<storyKey>]. Acceptable statuses: 'backlog' (no spec yet — bmad-build-auto will create it in step 02), 'ready-for-dev' (spec committed, ready to implement), 'in-progress' (already in flight — resume case), 'review' (re-attempting after review). REJECT only 'done' (already complete) or 'awaiting-operator' / 'blocked' (deferred by operator). If rejected, HALT with sprintStatusUpdated:false.
 5. Sync story branch with prd (use prdWorktreePath for rebase, NOT repoRoot — that would corrupt the main checkout):
    a. \`git -C prdWorktreePath fetch origin <baseBranch> <storyBranch>\`
    b. \`storyCount=$(git -C prdWorktreePath rev-list --count origin/<baseBranch>..origin/<storyBranch>)\`

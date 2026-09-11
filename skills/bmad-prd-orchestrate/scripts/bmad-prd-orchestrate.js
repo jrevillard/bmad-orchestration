@@ -264,17 +264,24 @@ const buildPlanState = () => ({
 // choice BEFORE the fresh-run halt block below so a resumed run never
 // re-prompts the dep-inference confirmation that was already given.
 if (userChoice) {
-  if (userChoice === 'confirm_deps' && confirmedDeps) {
-    log(`Resuming with confirm_deps (confirmedDeps entries: ${Array.isArray(confirmedDeps) ? confirmedDeps.length : Object.keys(confirmedDeps).length})`)
-    if (Array.isArray(confirmedDeps)) {
-      planResult.inferred = confirmedDeps
-    } else if (typeof confirmedDeps === 'object') {
-      planResult.inferred = Object.entries(confirmedDeps).map(([story, deps]) => ({
-        story,
-        depends_on: Array.isArray(deps) ? deps : [],
-      }))
+  if (userChoice === 'confirm_deps') {
+    // Operator reviewed inferred graph at dep_inference_confirm halt and said confirm.
+    // If the dispatcher ALSO passes confirmedDeps (operator-edited graph), use that.
+    // Otherwise proceed with state.inferred / planResult.inferred as-is.
+    if (confirmedDeps) {
+      log(`Resuming with confirm_deps (+ edited confirmedDeps entries: ${Array.isArray(confirmedDeps) ? confirmedDeps.length : Object.keys(confirmedDeps).length})`)
+      if (Array.isArray(confirmedDeps)) {
+        planResult.inferred = confirmedDeps
+      } else if (typeof confirmedDeps === 'object') {
+        planResult.inferred = Object.entries(confirmedDeps).map(([story, deps]) => ({
+          story,
+          depends_on: Array.isArray(deps) ? deps : [],
+        }))
+      }
+      log(`Updated inferred to ${planResult.inferred.length} confirmed entries`)
+    } else {
+      log(`Resuming with confirm_deps (using inferred graph as-is, entries: ${planResult.inferred?.length || 0})`)
     }
-    log(`Updated inferred to ${planResult.inferred.length} confirmed entries`)
     await writeState(buildPlanState())
   } else if (userChoice === 'proceed_without_inference') {
     log(`Resuming with proceed_without_inference (clearing inferred graph)`)
@@ -337,22 +344,25 @@ let state = {
 }
 
 // State persistence helpers (Phase 3 owns these; Task 2 inlined a parallel helper for plan-time).
+// Per-script counter for unique temp filenames. Workflow tool forbids Date.now()
+// and Math.random() (break resume), so use a simple increment like build-converge.
+let writeStateCallSeq = 0;
+
 // Declared as function declarations so they hoist — Phase 2 already calls writeState
 // before this source position executes (TDZ on `const` would otherwise throw).
 async function writeState(stateObj) {
-  // Grouped coupled write via bash helper: single Bash call writes BOTH
-  // state.json AND deps.json atomically (.tmp + mv) and validates JSON.
-  // deps.json mirrors state.json.inferred — single source of truth = state.json.
-  // Bash script does the work; agent is just transport. This function replaces
-  // the prior verbose agent-based writeState that only wrote state.json.
-  const depsContent = { inferred: stateObj.inferred };
-  const bashCmd = `STATE_CONTENT=$(cat <<'STATE_EOF'
-${JSON.stringify(stateObj, null, 2)}
-STATE_EOF
-) && DEPS_CONTENT=$(cat <<'DEPS_EOF'
-${JSON.stringify(depsContent, null, 2)}
-DEPS_EOF
-) && STATE_FILE=/tmp/bmad-orch-state-$$.json && DEPS_FILE=/tmp/bmad-orch-deps-$$.json && printf '%s' "$STATE_CONTENT" > "$STATE_FILE" && printf '%s' "$DEPS_CONTENT" > "$DEPS_FILE" && "${args_.helpersDir || ""}write-state.sh" '${runDir}' "$STATE_FILE" "$DEPS_FILE" && rm -f "$STATE_FILE" "$DEPS_FILE"`;
+  // Write state.json + deps.json atomically via base64-encoded echo + decode.
+  // Base64 eliminates quoting hazards (state may contain single quotes, backticks,
+  // dollar signs). Atomic via .tmp + mv. The agent's bash task is a simple
+  // pipe-decode-redirect — minimal surface for the LLM to rewrite incorrectly.
+  // (Previously the bash command heredoc'd raw JSON, and the LLM rewrote it
+  // into `echo ... > /tmp/bmad-orch-output.txt` — wrong path, no writeState effect.)
+  writeStateCallSeq++;
+  const stateB64 = Buffer.from(JSON.stringify(stateObj)).toString('base64');
+  const depsB64 = Buffer.from(JSON.stringify({ inferred: stateObj.inferred })).toString('base64');
+  const tmpState = `/tmp/bmad-orch-state-${writeStateCallSeq}.json`;
+  const tmpDeps = `/tmp/bmad-orch-deps-${writeStateCallSeq}.json`;
+  const bashCmd = `mkdir -p '${runDir}' && echo '${stateB64}' | base64 -d > '${tmpState}.tmp' && mv '${tmpState}.tmp' '${runDir}/state.json' && echo '${depsB64}' | base64 -d > '${tmpDeps}.tmp' && mv '${tmpDeps}.tmp' '${runDir}/deps.json'`;
   return await agent(
     `Run this exact bash command. Return its stdout verbatim. Do NOT modify, summarize, or diagnose.
 
