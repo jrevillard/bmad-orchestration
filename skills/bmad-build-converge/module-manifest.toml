@@ -1,11 +1,4 @@
 module = "bmad-orchestration"
 version = "1.0.0"
 update_source = "github:jrevillard/bmad-orchestration/skills"
-knowledge = "`references/help.md` in the `bmad-build-converge` skill"
-
-scripts = [
-  "scripts/bmad-build-converge.js",
-  "scripts/write-state.sh",
-  "scripts/orchestrate-helper.sh",
-  "scripts/ci-monitor.sh",
-]
+knowledge = "`references/help.md` in the `bmad-prd-orchestrate` skill"
