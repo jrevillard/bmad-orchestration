@@ -448,10 +448,18 @@ if (userChoice) {
   await writeState(buildPlanState())
 }
 
+// DEBUG: diagnostic — was Phase 3 supposed to start here?
+log(`PHASE 3 GATE: userChoice=${JSON.stringify(userChoice)} resume=${JSON.stringify(resume)} inferDeps=${inferDeps} noInfer=${noInfer} autoAcceptDeps=${autoAcceptDeps} inferred.length=${planResult.inferred?.length || 0}`)
+
 // ============================================================================
 // PHASE 3: EXECUTE — per-story loop with dep-check + converge dispatch
 // ============================================================================
-phase('Execute')
+try {
+  phase('Execute')
+} catch (e) {
+  log(`PHASE 3 GATE FAILED at phase('Execute'): ${e}`)
+  throw e
+}
 log('Starting execute loop...')
 
 // State init (snapshot of planResult; will be overwritten by loadState on resume)
