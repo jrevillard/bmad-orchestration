@@ -211,3 +211,36 @@ test('shouldAcceptStoryStatus rejects unknown statuses (defensive)', () => {
   assert.equal(fn(''), false);
   assert.equal(fn(undefined), false);
 });
+
+// ============================================================================
+// buildDispatchMarker(storyKey, dispatchSeq) → string
+// Builds the per-dispatch marker used to disambiguate concurrent dispatches.
+// Pure: input string + number → marker string. Sanitizes storyKey by
+// replacing non-alphanumeric chars with `_` so the marker is shell-safe.
+// ============================================================================
+
+test('buildDispatchMarker produces unique markers per dispatchSeq', () => {
+  const fn = extractFunction(source, 'buildDispatchMarker');
+  assert.notEqual(fn('1-1', 1), fn('1-1', 2));
+  assert.notEqual(fn('1-1', 100), fn('2-1', 100));
+});
+
+test('buildDispatchMarker preserves alphanumerics, dashes, underscores', () => {
+  const fn = extractFunction(source, 'buildDispatchMarker');
+  const m = fn('1-3-login_form', 1);
+  assert.match(m, /^BMADBC_1-3-login_form_1$/);
+});
+
+test('buildDispatchMarker sanitizes unsafe shell chars to _', () => {
+  const fn = extractFunction(source, 'buildDispatchMarker');
+  // Story keys with dots, slashes, or other shell-special chars → sanitized.
+  // Use a clearly unsafe char that REPLACE in the function actually targets.
+  assert.match(fn('1.3-foo', 1), /^BMADBC_1_3-foo_1$/);
+  assert.match(fn('1/3-foo', 1), /^BMADBC_1_3-foo_1$/);
+});
+
+test('buildDispatchMarker uses BMADBC prefix (orchestrator convention)', () => {
+  const fn = extractFunction(source, 'buildDispatchMarker');
+  // Marker prefix identifies orchestrator-owned temp files in /tmp.
+  assert.match(fn('any-key', 0), /^BMADBC_/);
+});

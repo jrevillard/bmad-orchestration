@@ -161,6 +161,15 @@ function shouldAcceptStoryStatus(status) {
   return status === 'backlog' || status === 'ready-for-dev' || status === 'in-progress' || status === 'review';
 }
 
+// buildDispatchMarker(storyKey, dispatchSeq) → string
+// Per-dispatch unique marker (used as bash variable name + /tmp filename base).
+// Sanitizes storyKey by replacing non-[a-zA-Z0-9_-] chars with `_` so the
+// marker is shell-safe. Pure: input → marker, no side effects.
+function buildDispatchMarker(storyKey, dispatchSeq) {
+  const safeStoryKey = (storyKey || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `BMADBC_${safeStoryKey}_${dispatchSeq}`;
+}
+
 function base64Encode(input) {
   const bytes = [];
   for (let i = 0; i < input.length; i++) {
@@ -210,7 +219,7 @@ let dispatchSeq = 0;
 async function dispatchViaClaudeP(opts) {
   const { label, phase, prompt, schema, cwd, allowedTools, maxBudgetUsd } = opts;
   dispatchSeq++;
-  const marker = `BMADBC_${storyKey.replace(/[^a-zA-Z0-9_-]/g, '_')}_${dispatchSeq}`;
+  const marker = buildDispatchMarker(storyKey, dispatchSeq);
   // JSON schema can't be inlined as '...' inside the bash -c '...' command —
   // the single quotes would clash. Pass via SCHEMA env var (set BEFORE nohup,
   // inherited by the inner bash). The inner bash -c references $SCHEMA.
