@@ -139,3 +139,29 @@ test('toRepoRelativePath is purely deterministic', () => {
   assert.equal(a, b);
   assert.equal(a, '_bmad/c.md');
 });
+
+// ============================================================================
+// formatMRDescriptionPlaceholder(storyKey) → string
+// Pure: returns the placeholder body written to the MR description file when
+// the spec doesn't exist at MR-create time (normal case — bmad-build-auto
+// creates the spec during Build, post-MR-create). Reviewers see this until
+// the full spec is pushed (post-build, after bmad-build-auto's spec commit).
+// ============================================================================
+
+test('formatMRDescriptionPlaceholder has required structure', () => {
+  const fn = extractFunction(source, 'formatMRDescriptionPlaceholder');
+  const out = fn('1-3-login-form');
+  // YAML frontmatter delimiters so platforms render it as a collapsible.
+  assert.match(out, /^---\n/);
+  assert.match(out, /\n---\n?$/);
+  // References story key + spec path so reviewers know where the real spec lives.
+  assert.match(out, /Story 1-3-login-form/);
+  assert.match(out, /1-3-login-form\.md/);
+  assert.match(out, /_bmad-output\/implementation-artifacts\/stories/);
+});
+
+test('formatMRDescriptionPlaceholder is purely deterministic', () => {
+  const fn = extractFunction(source, 'formatMRDescriptionPlaceholder');
+  assert.equal(fn('1-3-foo'), fn('1-3-foo'));
+  assert.notEqual(fn('1-3-foo'), fn('1-4-bar'));
+});
