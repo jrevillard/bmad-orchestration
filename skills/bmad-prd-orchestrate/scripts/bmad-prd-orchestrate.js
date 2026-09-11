@@ -42,6 +42,15 @@ function isEpicTransition(lastEpic, currentEpic) {
   return lastEpic !== currentEpic;
 }
 
+// findUnmetDeps(deps, depStatuses) → array of deps whose status is not 'done'.
+// A dep is "met" when sprint-status reports it 'done'. Sprint-status is the
+// ground truth across all runs (state.completed is this-run-only — cross-run
+// deps would falsely fail if checked against state.completed alone). Pure:
+// filter, no side effects.
+function findUnmetDeps(deps, depStatuses) {
+  return deps.filter(d => (depStatuses || {})[d] !== 'done');
+}
+
 const args_ = args || {};
 const storyKey = args_.storyKey || null;
 const epicKey = args_.epicKey || null;
@@ -747,7 +756,7 @@ ${bashReadCmd}`,
   // (story completed in a previous orchestrate session) would falsely fail
   // if checked against state.completed alone. Sprint-status is the ground
   // truth for the entire PRD across all runs.
-  const unmetDeps = deps.filter(d => depStatusCheck.statuses[d] !== 'done');
+  const unmetDeps = findUnmetDeps(deps, depStatusCheck.statuses);
   if (unmetDeps.length > 0) {
     log(`Story ${sk} has unmet deps: ${unmetDeps.join(', ')}; skipping`)
     state.skipped.push({ story: sk, reason: 'unmet_deps', deps: unmetDeps });

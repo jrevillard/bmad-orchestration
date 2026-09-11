@@ -269,3 +269,45 @@ test('isEpicTransition is purely boolean (no side effects)', () => {
   assert.equal(a, b);
   assert.equal(typeof a, 'boolean');
 });
+
+// ============================================================================
+// findUnmetDeps(deps, depStatuses) → string[]
+// Returns the subset of `deps` whose status in `depStatuses` is NOT 'done'.
+// A dep is "met" when sprint-status reports it 'done' (sprint-status is the
+// ground truth across all runs — state.completed is this-run-only).
+// Pure: no side effects, just a filter.
+// ============================================================================
+
+test('findUnmetDeps returns empty when all deps are done', () => {
+  const fn = extractFunction(source, 'findUnmetDeps');
+  assert.deepEqual([...fn(['1-1', '1-2'], { '1-1': 'done', '1-2': 'done' })], []);
+});
+
+test('findUnmetDeps returns deps whose status is not done', () => {
+  const fn = extractFunction(source, 'findUnmetDeps');
+  assert.deepEqual([...fn(['1-1', '1-2', '1-3'], { '1-1': 'done', '1-2': 'in-progress', '1-3': 'review' })], ['1-2', '1-3']);
+});
+
+test('findUnmetDeps returns dep when status is missing from depStatuses', () => {
+  const fn = extractFunction(source, 'findUnmetDeps');
+  // Missing status = treat as unmet (defensive — shouldn't happen in practice
+  // if the orchestrator's all-read correctly populated every dep).
+  assert.deepEqual([...fn(['1-1', '1-2'], { '1-1': 'done' })], ['1-2']);
+});
+
+test('findUnmetDeps returns all deps when no statuses provided', () => {
+  const fn = extractFunction(source, 'findUnmetDeps');
+  assert.deepEqual([...fn(['1-1', '1-2', '1-3'], {})], ['1-1', '1-2', '1-3']);
+});
+
+test('findUnmetDeps handles empty deps array', () => {
+  const fn = extractFunction(source, 'findUnmetDeps');
+  assert.deepEqual([...fn([], { '1-1': 'done' })], []);
+});
+
+test('findUnmetDeps preserves dep order', () => {
+  const fn = extractFunction(source, 'findUnmetDeps');
+  // Important: order must match input order so logs are deterministic and
+  // journal entries can be diffed across runs.
+  assert.deepEqual([...fn(['c-dep', 'a-dep', 'b-dep'], { 'a-dep': 'review', 'b-dep': 'done', 'c-dep': 'in-progress' })], ['c-dep', 'a-dep']);
+});
