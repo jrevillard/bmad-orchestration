@@ -11,6 +11,8 @@ export const meta = {
   ],
 };
 
+const main = async () => {
+
 const args_ = args || {};
 const storyKey = args_.storyKey || null;
 const epicKey = args_.epicKey || null;
@@ -21,15 +23,20 @@ const hitlEvery = args_.hitlEvery === undefined ? 0 : args_.hitlEvery;
 const hitlFinalOnly = args_.hitlFinalOnly || false;
 const inferDeps = args_.inferDeps !== false;  // default true
 const noInfer = args_.noInfer || false;
+const autoAcceptDeps = args_.autoAcceptDeps === true;  // run inference but skip the dep_inference_confirm halt
 const retro = args_.retro || false;
-const retryPolicy = args_.retryPolicy || 'once';
+// maxRetries: number of times to re-queue each ci_hardfail halt before blocking (default 3, 0 = never retry).
+const maxRetries = (args_.maxRetries !== undefined && args_.maxRetries !== null) ? Number(args_.maxRetries) : 3;
+// hitlEveryEpic: halt at every epic boundary (independent of retro — retro also halts at epic boundary, but invokes bmad-retrospective; this is halt-only).
+const hitlEveryEpic = args_.hitlEveryEpic === true;
+// convergeScriptPathArg: pre-resolved candidate path passed to the setup agent prompt (interpolated at dispatch — agents have no JS scope).
+const convergeScriptPathArg = args_.buildConvergeScriptPath || '';
 const resume = args_.resume || null;
 const userChoice = args_.userChoice || null;
 const confirmedDeps = args_.confirmedDeps || null;
 const maxIterations = args_.maxIterations || 5;
 const cleanup = args_.cleanup || false;
 const timestamp = args_.timestamp || 'unknown';
-const projectRoot = '/home/jerome/git_projects/ITU/genie-ai';
 // runDir + convergeScriptPath are derived AFTER Setup (so the discovery step
 // can fail fast without leaving stale run-dir references in code).
 
@@ -43,11 +50,9 @@ const SETUP_SCHEMA = {
     prdBranch: { type: 'string' },
     sprintStatusPath: { type: 'string' },
     issueTrackingConfig: { type: 'object' },
-    gitlabHost: { type: 'string' },
-    gitlabProjectId: { type: 'integer' },
     convergeScriptPath: { type: 'string' },
   },
-  required: ['repoRoot', 'prdWorktreePath', 'prdKey', 'baseBranch', 'prdBranch', 'sprintStatusPath', 'issueTrackingConfig', 'gitlabHost', 'gitlabProjectId', 'convergeScriptPath'],
+  required: ['repoRoot', 'prdWorktreePath', 'prdKey', 'baseBranch', 'prdBranch', 'sprintStatusPath', 'issueTrackingConfig', 'convergeScriptPath'],
 };
 
 const DEP_ENTRY_SCHEMA = {
@@ -92,13 +97,11 @@ STEPS:
    b. Parse output: each entry starts with 'worktree <path>', followed by 'branch refs/heads/<name>'.
    c. Find the entry whose branch matches pattern 'refs/heads/feat/*/prd'. Extract prdKey (the * in feat/*/prd).
 3. Read _bmad/custom/issue-tracking.yaml from prdWorktreePath. Required fields: git_platform, host, project, worktree_base, branch_patterns.prd, branch_patterns.story.
-4. Resolve gitlabProjectId:
-   a. \`GITLAB_HOST=<host> glab api "projects?search=<project>&simple=true"\` → first match's id.
-5. Resolve convergeScriptPath — the bmad-build-converge.js file MUST exist for Phase 3 dispatch to work.
-   a. Prefer `args.buildConvergeScriptPath` (set by the SKILL.md dispatcher at install time; ships together in the same module). Verify it exists with `ls -1 <candidate> 2>/dev/null && echo EXISTS`.
-   b. If `args.buildConvergeScriptPath` is absent or the path doesn't resolve, return convergeScriptPath="" so Phase 3 fails fast with a clear error instead of throwing mid-loop.
-   d. If neither exists, return convergeScriptPath="" so Phase 3 fails fast with a clear error instead of throwing mid-loop.
-6. baseBranch = 'feat/<prdKey>/prd'. prdBranch = baseBranch.
+4. Resolve convergeScriptPath — the bmad-build-converge.js file MUST exist for Phase 3 dispatch to work.
+   a. Prefer the candidate path below (set by the SKILL.md dispatcher at install time; ships together in the same module). Verify it exists with \`ls -1 <candidate> 2>/dev/null && echo EXISTS\`.
+   b. If the candidate is empty or the path doesn't resolve, return convergeScriptPath="" so Phase 3 fails fast with a clear error instead of throwing mid-loop.
+   c. Candidate path: \`${convergeScriptPathArg}\`
+5. baseBranch = 'feat/<prdKey>/prd'. prdBranch = baseBranch.
 6. sprintStatusPath = prdWorktreePath + '/_bmad-output/implementation-artifacts/sprint-status.yaml'.
 7. Initialize run dir (THE RUN DIR IS THE ONLY PERMITTED WRITE LOCATION):
    a. Compute runDir = prdWorktreePath + '/_bmad-output/implementation-artifacts/orchestrate-runs/${timestamp}'
@@ -126,7 +129,7 @@ const runDir = setup.prdWorktreePath + '/_bmad-output/implementation-artifacts/o
 // verifies which path exists (worktree path first, bare-repo fallback) and
 // returns the resolvable path. Empty string = both candidates missing — Phase 3
 // fails fast with a clear log line instead of throwing inside workflow().
-const convergeScriptPath = setup.convergeScriptPath || '';
+const convergeScriptPath = setup.convergeScriptPath || convergeScriptPathArg || '';
 if (prdKey && prdKey !== setup.prdKey) {
   log(`WARNING: args.prdKey (${prdKey}) != discovered prdKey (${setup.prdKey}); using discovered value`)
 } else if (prdKey) {
@@ -295,7 +298,7 @@ if (userChoice) {
     runDir,
     userOptions: ['confirm_deps', 'proceed_without_inference', 'abort_prd'],
   }
-} else if (inferDeps && !noInfer && planResult.inferred.length > 0) {
+} else if (inferDeps && !noInfer && !autoAcceptDeps && planResult.inferred.length > 0) {
   // First-run halt to confirm inferred graph
   log('Halting to confirm inferred dependency graph...')
   await writeState(buildPlanState())
@@ -393,33 +396,33 @@ STEPS:
   );
 }
 
-// Cross-run CI retry helper (retryPolicy semantics: once | always | never).
+// Cross-run CI retry helper (maxRetries semantics: integer, default 3).
 // Re-queues stories whose previous attempt halted with reason='ci_hardfail'.
-// 'once' marks each halt entry with retried=true so subsequent resumes skip
-// it; 'always' re-queues every resume without marking; 'never' is a no-op.
-// Stories already present in the queue or completed list are skipped to avoid
-// double-dispatch.
+// Each halt entry tracks h.retries (count of past re-queues); skip if already
+// at or above maxRetries. Stories already in the queue or completed are skipped
+// to avoid double-dispatch.
 const requeueCIHardfails = () => {
-  if (retryPolicy === 'never') return 0;
+  if (maxRetries <= 0) return 0;
   const queueSet = new Set(state.storyQueue);
   const completedSet = new Set(state.completed);
   const seen = new Set(); // de-dupe across multiple halt entries for the same story
   let count = 0;
   for (const h of (state.halts || [])) {
     if (!h || h.reason !== 'ci_hardfail' || !h.story) continue;
-    if (retryPolicy === 'once' && h.retried === true) continue;
+    const retriesSoFar = h.retries || 0;
+    if (retriesSoFar >= maxRetries) continue;
     if (seen.has(h.story)) continue;
     if (queueSet.has(h.story) || completedSet.has(h.story)) continue;
     state.storyQueue.unshift(h.story);
     queueSet.add(h.story);
     seen.add(h.story);
-    if (retryPolicy === 'once') h.retried = true;
+    h.retries = retriesSoFar + 1;
     count++;
   }
   if (count > 0) {
     // Drop these stories from state.blocked so retry_blocked doesn't re-add them too
     state.blocked = state.blocked.filter(b => !seen.has(typeof b === 'string' ? b : (b && b.story) || null));
-    log(`retryPolicy=${retryPolicy}: re-queued ${count} ci_hardfail stor(y/ies) at front of queue`)
+    log(`maxRetries=${maxRetries}: re-queued ${count} ci_hardfail stor(y/ies) at front of queue`)
   }
   return count;
 };
@@ -586,9 +589,61 @@ Return JSON: { remoteSha: <exact stdout string>, exitCode: <integer> }. Do NOT m
 await writeState(state);
 
 // Per-story loop
+let lastEpic = null;
 while (state.storyQueue.length > 0) {
   const sk = state.storyQueue[0];
   state.iterationCount++;
+
+  // Epic-boundary HITL: detect transition from previous story's epic.
+  // Canonical story key format per upstream bmad-issue-tracking `bmad-workflow-lang.md:451-452`:
+  //   `<epicNum>-<storyNum>[-<suffix>]` (e.g. `1-3-login-form`, optional letter suffix `4-1-a` per local spec L186).
+  // Epic = first dash-separated segment. storyQueue is in epic-order (L197-198), so
+  // consecutive stories only share an epic when they belong to the same epic. First story sets the baseline (no halt).
+  const currentEpic = (sk.split('-')[0]) || sk;
+  if (lastEpic !== currentEpic) {
+    log(`Epic transition: ${lastEpic || '(start)'} → ${currentEpic} — marking epic as in-progress via bmad-issue-tracking-sync`)
+    // Mark the new epic as in-progress on the issue tracker. First iteration
+    // (lastEpic=null) marks the very first epic; subsequent transitions mark each
+    // subsequent epic. Soft-fail: if the issue isn't found, log and continue
+    // (don't block the build over missing tracker sync).
+    let epicStatusError = null;
+    try {
+      await agent(
+        `Mark the epic "${currentEpic}" as in-progress for PRD "${setup.prdKey}" via the Skill.
+
+Invoke the Skill with these env vars (one shot, no other actions):
+   BMAD_ISSUE_ACTION=set-status \\
+   BMAD_ISSUE_KEY="${currentEpic}" \\
+   BMAD_ISSUE_PRD_KEY="${setup.prdKey}" \\
+   BMAD_ISSUE_NEW_STATUS="in-progress" \\
+   BMAD_ISSUE_CLOSE=false \\
+       Skill: bmad-issue-tracking-sync
+
+Capture { issue_id } from stdout. If the Skill reports the issue was not found, set issue_id=null and return normally (do not halt). Soft-fail by design — a missing epic issue must not block the build.`,
+        { label: `epic-status-${currentEpic}`, phase: 'Execute', schema: { type: 'object', properties: { issue_id: { type: 'string' } } }, agentType: 'general-purpose' }
+      );
+    } catch (e) {
+      epicStatusError = String(e);
+      log(`Epic status sync failed for ${currentEpic}: ${epicStatusError} — continuing build (soft-fail)`);
+    }
+    // Always journal — operators reviewing a halted run via journal.jsonl
+    // need a signal that the issue tracker was attempted, regardless of outcome.
+    await appendJournal({ event: epicStatusError ? 'epic_in_progress_failed' : 'epic_in_progress', epic: currentEpic, iteration: state.iterationCount, error: epicStatusError || undefined });
+  }
+  if (hitlEveryEpic && lastEpic !== null && currentEpic !== lastEpic) {
+    log(`Epic-boundary HITL: ${lastEpic} → ${currentEpic} at iteration ${state.iterationCount}`)
+    state.halts.push({ reason: 'epic_boundary', iteration: state.iterationCount, details: { from: lastEpic, to: currentEpic } });
+    await writeState(state);
+    await appendJournal({ event: 'halt_epic_boundary', iteration: state.iterationCount, from: lastEpic, to: currentEpic });
+    return {
+      haltReason: 'epic_boundary',
+      context: { from: lastEpic, to: currentEpic, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
+      resumeToken: timestamp,
+      runDir,
+      userOptions: ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
+    };
+  }
+  lastEpic = currentEpic;
 
   log(`--- Iteration ${state.iterationCount}: story ${sk} (queue remaining: ${state.storyQueue.length}) ---`)
 
@@ -599,7 +654,7 @@ while (state.storyQueue.length > 0) {
   // per loop iter. The helper does the YAML grep, agent is transport.
   const inferredEdge = planResult.inferred.find(e => e.story === sk);
   const deps = inferredEdge ? inferredEdge.depends_on : [];
-  const bashReadCmd = `"${args.helpersDir}orchestrate-helper.sh" all-read '${setup.sprintStatusPath}' '${sk}' '${deps.join(',')}'`;
+  const bashReadCmd = `"${args_.helpersDir || ''}orchestrate-helper.sh" all-read '${setup.sprintStatusPath}' '${sk}' '${deps.join(',')}'`;
   const allRead = await agent(
     `Run this exact bash command. Return its stdout verbatim. Do NOT modify, summarize, or diagnose.
 
@@ -661,18 +716,31 @@ ${bashReadCmd}`,
       storyKey: sk,
       maxIterations,
       timestamp: timestamp + '-' + sk,
+      helpersDir: args_.helpersDir || '',  // forward so sub-workflow's CI check can find ci-monitor.sh
     });
   } catch (e) {
     launchError = String(e);
   }
 
-  // Handle launch failure (workflow() threw)
+  // Handle launch failure (workflow() threw — infrastructure error, NOT a per-story issue).
+  // If one story fails to launch, the same scriptPath will fail for every subsequent
+  // story. Continuing just wastes N doomed sub-workflow attempts before the operator
+  // sees the real problem. Halt immediately so the operator can fix (missing script,
+  // wrong scriptPath, runtime crash) and resume.
   if (launchError || !convergeResult) {
     log(`Sub-workflow launch failed for ${sk}: ${launchError}`)
     state.blocked.push({ story: sk, reason: 'launch_failed', details: launchError });
     state.storyQueue.shift();
-    await appendJournal({ event: 'launch_failed', storyKey: sk, iteration: state.iterationCount });
-    continue;
+    state.halts.push({ reason: 'launch_failure', story: sk, iteration: state.iterationCount, details: launchError });
+    await writeState(state);
+    await appendJournal({ event: 'halt_launch_failure', storyKey: sk, iteration: state.iterationCount, error: launchError });
+    return {
+      haltReason: 'launch_failure',
+      context: { story: sk, error: launchError, completed: state.completed, blocked: state.blocked, skipped: state.skipped, awaitingOperator: state.awaitingOperator },
+      resumeToken: timestamp,
+      runDir,
+      userOptions: ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
+    };
   }
 
   // MR-creation failure: the converge sub-workflow returns converged:true with
@@ -1019,3 +1087,7 @@ CONSTRAINTS:
 }
 
 return finalReport;
+
+};
+
+await main();
