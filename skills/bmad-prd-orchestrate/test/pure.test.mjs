@@ -430,6 +430,42 @@ test('findUnmetDeps preserves dep order', () => {
 });
 
 // ============================================================================
+// base64Encode(input) → string
+// Pure-JS UTF-8 → base64 (Workflow runtime lacks `Buffer` + `btoa`). Used by
+// writeState's bash command to safely embed state/deps JSON in a single-line
+// command (heredocs were vulnerable to LLM rewriting). Tests document the
+// "no Buffer" contract so a future maintainer doesn't re-introduce Buffer.from.
+// ============================================================================
+
+test('base64Encode produces standard base64 for ASCII', () => {
+  const fn = extractFunction(source, 'base64Encode');
+  assert.equal(fn(''), '');
+  assert.equal(fn('a'), 'YQ==');
+  assert.equal(fn('hello'), 'aGVsbG8=');
+});
+
+test('base64Encode matches Buffer.from(...).toString("base64") for sample inputs', () => {
+  // Compare against Node's Buffer — a Buffer-using implementation would silently
+  // work in tests but throw ReferenceError in Workflow runtime. This test
+  // documents the canonical equivalence.
+  const fn = extractFunction(source, 'base64Encode');
+  for (const s of ['', 'x', 'hello world', 'café', '🚀 launch', JSON.stringify({a: 1, b: [2, 3]})]) {
+    const expected = Buffer.from(s, 'utf8').toString('base64');
+    assert.equal(fn(s), expected, `mismatch for ${JSON.stringify(s)}`);
+  }
+});
+
+test('base64Encode does NOT reference Buffer (Workflow runtime check)', () => {
+  // Static check: grep for Buffer. inside the function body. If someone
+  // "optimizes" this to use Buffer.from, this test fails — catches the
+  // Workflow-runtime regression at unit-test time.
+  const source = readFileSync(SCRIPT_PATH, 'utf8');
+  const m = source.match(/function\s+base64Encode\s*\([^)]*\)\s*\{[\s\S]*?\n\}/);
+  assert.ok(m, 'base64Encode should be a function declaration');
+  assert.ok(!/\bBuffer\b/.test(m[0]), 'base64Encode must not reference Buffer — Workflow runtime has no Buffer global');
+});
+
+// ============================================================================
 // applyUserChoice(planResult, userChoice, confirmedDeps) → { planResult, halt }
 // Pure transformation: takes the plan result + the operator's userChoice from
 // a halted run + optional confirmedDeps (operator-edited graph), returns the

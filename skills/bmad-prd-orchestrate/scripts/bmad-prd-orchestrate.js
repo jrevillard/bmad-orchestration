@@ -35,6 +35,37 @@ function extractEpicKey(sk) {
   return (sk.split('-')[0]) || sk;
 }
 
+// base64Encode(input) → string
+// Pure-JS UTF-8 → base64 encoder (Workflow runtime lacks `Buffer` + `btoa`).
+// Used by writeState's bash command to safely embed state/deps JSON in a
+// single-line command (heredocs were vulnerable to LLM rewriting). Keep in
+// sync with the equivalent in skills/bmad-build-converge/scripts/bmad-build-converge.js
+// (no shared module — Workflow-tool JS files can't import each other).
+function base64Encode(input) {
+  const bytes = [];
+  for (let i = 0; i < input.length; i++) {
+    let c = input.charCodeAt(i);
+    if (c < 0x80) bytes.push(c);
+    else if (c < 0x800) bytes.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+    else if (c < 0xd800 || c >= 0xe000) bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    else {
+      i++;
+      c = 0x10000 + (((c & 0x3ff) << 10) | (input.charCodeAt(i) & 0x3ff));
+      bytes.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    }
+  }
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b1 = bytes[i], b2 = i + 1 < bytes.length ? bytes[i + 1] : 0, b3 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+    out += A[b1 >> 2];
+    out += A[((b1 & 3) << 4) | (b2 >> 4)];
+    out += i + 1 < bytes.length ? A[((b2 & 0xf) << 2) | (b3 >> 6)] : '=';
+    out += i + 2 < bytes.length ? A[(b3 & 0x3f)] : '=';
+  }
+  return out;
+}
+
 // isEpicTransition(lastEpic, currentEpic) → true when currentEpic differs from
 // lastEpic (including first iteration where lastEpic=null → "(start)"). Pure
 // comparison — no side effects.
@@ -449,8 +480,11 @@ async function writeState(stateObj) {
   // (Previously the bash command heredoc'd raw JSON, and the LLM rewrote it
   // into `echo ... > /tmp/bmad-orch-output.txt` — wrong path, no writeState effect.)
   writeStateCallSeq++;
-  const stateB64 = Buffer.from(JSON.stringify(stateObj)).toString('base64');
-  const depsB64 = Buffer.from(JSON.stringify({ inferred: stateObj.inferred })).toString('base64');
+  // base64Encode (pure helper, test/pure.test.mjs) — NOT Buffer.from: Workflow
+  // runtime has no `Buffer` global (no Node Buffer available). The pure helper
+  // is the canonical implementation. Same encoding, runtime-safe.
+  const stateB64 = base64Encode(JSON.stringify(stateObj));
+  const depsB64 = base64Encode(JSON.stringify({ inferred: stateObj.inferred }));
   const tmpState = `/tmp/bmad-orch-state-${writeStateCallSeq}.json`;
   const tmpDeps = `/tmp/bmad-orch-deps-${writeStateCallSeq}.json`;
   const bashCmd = `mkdir -p '${runDir}' && echo '${stateB64}' | base64 -d > '${tmpState}.tmp' && mv '${tmpState}.tmp' '${runDir}/state.json' && echo '${depsB64}' | base64 -d > '${tmpDeps}.tmp' && mv '${tmpDeps}.tmp' '${runDir}/deps.json'`;
