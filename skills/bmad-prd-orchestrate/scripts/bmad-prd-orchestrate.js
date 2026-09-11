@@ -429,19 +429,28 @@ STEPS:
 // Each halt entry tracks h.retries (count of past re-queues); skip if already
 // at or above maxRetries. Stories already in the queue or completed are skipped
 // to avoid double-dispatch.
-const requeueCIHardfails = () => {
-  if (maxRetries <= 0) return 0;
-  const queueSet = new Set(state.storyQueue);
-  const completedSet = new Set(state.completed);
+//
+// Pure: takes state + maxRetries as inputs, returns { state, count }. No
+// references to closure-scoped state — unit-testable via test/pure.test.mjs.
+function requeueCIHardfails(state, maxRetries) {
+  if (maxRetries <= 0) return { state, count: 0 };
+  const newState = {
+    storyQueue: [...state.storyQueue],
+    completed: state.completed,
+    blocked: state.blocked,
+    halts: state.halts ? state.halts.map(h => ({ ...h })) : [],
+  };
+  const queueSet = new Set(newState.storyQueue);
+  const completedSet = new Set(newState.completed);
   const seen = new Set(); // de-dupe across multiple halt entries for the same story
   let count = 0;
-  for (const h of (state.halts || [])) {
+  for (const h of newState.halts) {
     if (!h || h.reason !== 'ci_hardfail' || !h.story) continue;
     const retriesSoFar = h.retries || 0;
     if (retriesSoFar >= maxRetries) continue;
     if (seen.has(h.story)) continue;
     if (queueSet.has(h.story) || completedSet.has(h.story)) continue;
-    state.storyQueue.unshift(h.story);
+    newState.storyQueue.unshift(h.story);
     queueSet.add(h.story);
     seen.add(h.story);
     h.retries = retriesSoFar + 1;
@@ -449,7 +458,17 @@ const requeueCIHardfails = () => {
   }
   if (count > 0) {
     // Drop these stories from state.blocked so retry_blocked doesn't re-add them too
-    state.blocked = state.blocked.filter(b => !seen.has(typeof b === 'string' ? b : (b && b.story) || null));
+    newState.blocked = newState.blocked.filter(b => !seen.has(typeof b === 'string' ? b : (b && b.story) || null));
+  }
+  return { state: newState, count };
+}
+
+// Thin wrapper for orchestrator callers — applies the re-queue to the live
+// state and logs. Not unit-tested (closure over Workflow globals).
+const applyRequeueCIHardfails = () => {
+  const { state: newState, count } = requeueCIHardfails(state, maxRetries);
+  state = newState;
+  if (count > 0) {
     log(`maxRetries=${maxRetries}: re-queued ${count} ci_hardfail stor(y/ies) at front of queue`)
   }
   return count;
@@ -482,7 +501,7 @@ if (resume) {
 
   // Auto-requeue CI hard-fail halts per retryPolicy, BEFORE userChoice processing
   // so the operator's userChoice can still override (e.g. abort_prd still wins).
-  requeueCIHardfails();
+  applyRequeueCIHardfails();
 
   // Apply userChoice (periodic HITL options)
   if (userChoice === 'continue') {

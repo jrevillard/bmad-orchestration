@@ -105,3 +105,131 @@ test('extractEpicKey is stable across runs (no Math.random / Date.now)', () => {
   assert.equal(b, c);
   assert.equal(a, '7');
 });
+
+// ============================================================================
+// requeueCIHardfails(state, maxRetries) → { state, count }
+// Re-queues each ci_hardfail halt story at the front of the queue, up to
+// maxRetries times per halt entry (tracked via h.retries). Drops these
+// stories from state.blocked so retry_blocked doesn't double-add.
+// Pure: takes state as input, returns new state + count. No side effects.
+// ============================================================================
+
+test('requeueCIHardfails returns no-op when maxRetries = 0 (never retry)', () => {
+  const fn = extractFunction(source, 'requeueCIHardfails');
+  const state = {
+    storyQueue: [],
+    completed: [],
+    blocked: [{ story: '1-1', reason: 'ci_hardfail' }],
+    halts: [{ reason: 'ci_hardfail', story: '1-1', iteration: 1 }],
+  };
+  const { state: out, count } = fn(state, 0);
+  assert.equal(count, 0);
+  assert.equal(out.storyQueue.length, 0);
+});
+
+test('requeueCIHardfails re-queues ci_hardfail halts at front of queue', () => {
+  const fn = extractFunction(source, 'requeueCIHardfails');
+  const state = {
+    storyQueue: ['2-1'],
+    completed: [],
+    blocked: [],
+    halts: [{ reason: 'ci_hardfail', story: '1-1', iteration: 1 }],
+  };
+  const { state: out, count } = fn(state, 3);
+  assert.equal(count, 1);
+  // Re-queued at FRONT (unshift), so order is 1-1, 2-1.
+  assert.deepEqual([...out.storyQueue], ['1-1', '2-1']);
+});
+
+test('requeueCIHardfails increments h.retries per halt entry', () => {
+  const fn = extractFunction(source, 'requeueCIHardfails');
+  const state = {
+    storyQueue: [],
+    completed: [],
+    blocked: [],
+    halts: [{ reason: 'ci_hardfail', story: '1-1', iteration: 1 }],
+  };
+  const { state: out } = fn(state, 3);
+  assert.equal(out.halts[0].retries, 1);
+});
+
+test('requeueCIHardfails skips halt entries that already hit maxRetries', () => {
+  const fn = extractFunction(source, 'requeueCIHardfails');
+  const state = {
+    storyQueue: [],
+    completed: [],
+    blocked: [],
+    halts: [{ reason: 'ci_hardfail', story: '1-1', iteration: 1, retries: 3 }],
+  };
+  const { state: out, count } = fn(state, 3);
+  // retries=3 already at maxRetries=3 → skip.
+  assert.equal(count, 0);
+  assert.equal(out.storyQueue.length, 0);
+});
+
+test('requeueCIHardfails skips stories already in queue or completed', () => {
+  const fn = extractFunction(source, 'requeueCIHardfails');
+  const state = {
+    storyQueue: ['1-1'],          // already queued
+    completed: ['1-2'],           // already completed
+    blocked: [],
+    halts: [
+      { reason: 'ci_hardfail', story: '1-1', iteration: 1 },
+      { reason: 'ci_hardfail', story: '1-2', iteration: 2 },
+    ],
+  };
+  const { state: out, count } = fn(state, 3);
+  assert.equal(count, 0);
+  assert.deepEqual([...out.storyQueue], ['1-1']);
+});
+
+test('requeueCIHardfails dedupes multiple halts for same story', () => {
+  const fn = extractFunction(source, 'requeueCIHardfails');
+  const state = {
+    storyQueue: [],
+    completed: [],
+    blocked: [],
+    halts: [
+      { reason: 'ci_hardfail', story: '1-1', iteration: 1 },
+      { reason: 'ci_hardfail', story: '1-1', iteration: 2 },
+    ],
+  };
+  const { state: out, count } = fn(state, 3);
+  // Same story → dedupe → 1 re-queue, not 2.
+  assert.equal(count, 1);
+  assert.equal(out.storyQueue.length, 1);
+});
+
+test('requeueCIHardfails drops re-queued stories from state.blocked', () => {
+  const fn = extractFunction(source, 'requeueCIHardfails');
+  const state = {
+    storyQueue: [],
+    completed: [],
+    blocked: [
+      { story: '1-1', reason: 'ci_hardfail' },
+      { story: '1-2', reason: 'launch_failure' },   // not ci_hardfail
+    ],
+    halts: [{ reason: 'ci_hardfail', story: '1-1', iteration: 1 }],
+  };
+  const { state: out } = fn(state, 3);
+  // 1-1 should be dropped from blocked (it's back in the queue).
+  // 1-2 stays (not a ci_hardfail re-queue).
+  assert.equal(out.blocked.length, 1);
+  assert.equal(out.blocked[0].story, '1-2');
+});
+
+test('requeueCIHardfails ignores non-ci_hardfail halts', () => {
+  const fn = extractFunction(source, 'requeueCIHardfails');
+  const state = {
+    storyQueue: [],
+    completed: [],
+    blocked: [],
+    halts: [
+      { reason: 'launch_failure', story: '1-1', iteration: 1 },
+      { reason: 'merge_blocked', story: '1-2', iteration: 2 },
+    ],
+  };
+  const { state: out, count } = fn(state, 3);
+  assert.equal(count, 0);
+  assert.equal(out.storyQueue.length, 0);
+});
