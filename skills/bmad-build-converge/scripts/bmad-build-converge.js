@@ -152,6 +152,15 @@ function formatMRDescriptionPlaceholder(storyKey) {
   ].join('\n');
 }
 
+// shouldAcceptStoryStatus(status) → boolean
+// Guard for converge setup: only certain statuses allow setup to proceed.
+// Accept backlog/ready-for-dev/in-progress/review. Reject done/awaiting-operator/
+// blocked (terminal or deferred). Defensive reject for unknown values.
+// Pure: single-status decision, no Workflow globals.
+function shouldAcceptStoryStatus(status) {
+  return status === 'backlog' || status === 'ready-for-dev' || status === 'in-progress' || status === 'review';
+}
+
 function base64Encode(input) {
   const bytes = [];
   for (let i = 0; i < input.length; i++) {

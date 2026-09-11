@@ -266,6 +266,84 @@ test('isEpicTransition returns boolean type', () => {
 });
 
 // ============================================================================
+// shouldHaltAtEpicTransition(hitlEveryEpic, lastEpic, currentEpic) → boolean
+// Combines the hitlEveryEpic flag with the transition check. Halts at epic
+// boundary ONLY when (a) the operator opted in to epic-boundary halts AND
+// (b) the epic is actually changing (not the first iteration where
+// lastEpic=null). Pure decision.
+// ============================================================================
+
+test('shouldHaltAtEpicTransition halts on transition when flag is on', () => {
+  const fn = extractFunction(source, 'shouldHaltAtEpicTransition');
+  assert.equal(fn(true, '1', '2'), true);
+  assert.equal(fn(true, '4', '5'), true);
+});
+
+test('shouldHaltAtEpicTransition does NOT halt on first iteration even with flag on', () => {
+  const fn = extractFunction(source, 'shouldHaltAtEpicTransition');
+  // lastEpic=null → no transition from a real previous epic → don't halt.
+  assert.equal(fn(true, null, '1'), false);
+  assert.equal(fn(true, null, '4'), false);
+});
+
+test('shouldHaltAtEpicTransition does NOT halt within same epic', () => {
+  const fn = extractFunction(source, 'shouldHaltAtEpicTransition');
+  assert.equal(fn(true, '1', '1'), false);
+  assert.equal(fn(true, '4', '4'), false);
+});
+
+test('shouldHaltAtEpicTransition does NOT halt when flag is off', () => {
+  const fn = extractFunction(source, 'shouldHaltAtEpicTransition');
+  // Even on transition, no halt if operator didn't opt in.
+  assert.equal(fn(false, '1', '2'), false);
+  assert.equal(fn(false, '4', '5'), false);
+  // First iteration with flag off also no halt (consistent with default).
+  assert.equal(fn(false, null, '1'), false);
+});
+
+test('shouldHaltAtEpicTransition is purely boolean', () => {
+  const fn = extractFunction(source, 'shouldHaltAtEpicTransition');
+  assert.equal(typeof fn(true, '1', '2'), 'boolean');
+  assert.equal(typeof fn(false, '1', '2'), 'boolean');
+  assert.equal(typeof fn(true, null, '1'), 'boolean');
+});
+
+// ============================================================================
+// parseMaxRetries(rawValue) → integer
+// Parses the args.maxRetries arg with the documented default (3) and the
+// 0 = never-retry special case. Pure — no Workflow globals. Used by the
+// orchestrator's args parsing block at script top.
+// ============================================================================
+
+test('parseMaxRetries returns 3 when rawValue is undefined', () => {
+  const fn = extractFunction(source, 'parseMaxRetries');
+  assert.equal(fn(undefined), 3);
+});
+
+test('parseMaxRetries returns 3 when rawValue is null', () => {
+  const fn = extractFunction(source, 'parseMaxRetries');
+  assert.equal(fn(null), 3);
+});
+
+test('parseMaxRetries returns 0 (never retry) when rawValue is 0', () => {
+  const fn = extractFunction(source, 'parseMaxRetries');
+  assert.equal(fn(0), 0);
+  assert.equal(fn('0'), 0);
+});
+
+test('parseMaxRetries parses string numbers', () => {
+  const fn = extractFunction(source, 'parseMaxRetries');
+  assert.equal(fn('5'), 5);
+  assert.equal(fn('10'), 10);
+});
+
+test('parseMaxRetries rejects negative numbers (treated as default)', () => {
+  const fn = extractFunction(source, 'parseMaxRetries');
+  // Negative retries don't make sense — fall back to default (3).
+  assert.equal(fn(-1), 3);
+});
+
+// ============================================================================
 // findUnmetDeps(deps, depStatuses) → string[]
 // Returns the subset of `deps` whose status in `depStatuses` is NOT 'done'.
 // A dep is "met" when sprint-status reports it 'done' (sprint-status is the

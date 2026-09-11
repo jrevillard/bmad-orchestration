@@ -42,6 +42,15 @@ function isEpicTransition(lastEpic, currentEpic) {
   return lastEpic !== currentEpic;
 }
 
+// shouldHaltAtEpicTransition(hitlEveryEpic, lastEpic, currentEpic) → boolean
+// Combines the hitlEveryEpic flag with the transition check. Returns true
+// when (a) the operator opted in to epic-boundary halts AND (b) the epic is
+// actually changing (NOT first iteration — lastEpic=null means no real
+// previous epic to transition from).
+function shouldHaltAtEpicTransition(hitlEveryEpic, lastEpic, currentEpic) {
+  return hitlEveryEpic && lastEpic !== null && currentEpic !== lastEpic;
+}
+
 // findUnmetDeps(deps, depStatuses) → array of deps whose status is not 'done'.
 // A dep is "met" when sprint-status reports it 'done'. Sprint-status is the
 // ground truth across all runs (state.completed is this-run-only — cross-run
@@ -97,8 +106,18 @@ const inferDeps = args_.inferDeps !== false;  // default true
 const noInfer = args_.noInfer || false;
 const autoAcceptDeps = args_.autoAcceptDeps === true;  // run inference but skip the dep_inference_confirm halt
 const retro = args_.retro || false;
+// parseMaxRetries(rawValue) → integer
+// Parses the args.maxRetries arg. Default 3. 0 = never retry. Negative or
+// unparseable → fall back to default (defensive). Pure — no Workflow globals.
+function parseMaxRetries(rawValue) {
+  if (rawValue === undefined || rawValue === null) return 3;
+  const n = Number(rawValue);
+  if (!Number.isFinite(n) || n < 0) return 3;
+  return Math.floor(n);
+}
+
 // maxRetries: number of times to re-queue each ci_hardfail halt before blocking (default 3, 0 = never retry).
-const maxRetries = (args_.maxRetries !== undefined && args_.maxRetries !== null) ? Number(args_.maxRetries) : 3;
+const maxRetries = parseMaxRetries(args_.maxRetries);
 // hitlEveryEpic: halt at every epic boundary (independent of retro — retro also halts at epic boundary, but invokes bmad-retrospective; this is halt-only).
 const hitlEveryEpic = args_.hitlEveryEpic === true;
 // convergeScriptPathArg: pre-resolved candidate path passed to the setup agent prompt (interpolated at dispatch — agents have no JS scope).
@@ -716,7 +735,7 @@ Capture { issue_id } from stdout. If the Skill reports the issue was not found, 
     // need a signal that the issue tracker was attempted, regardless of outcome.
     await appendJournal({ event: epicStatusError ? 'epic_in_progress_failed' : 'epic_in_progress', epic: currentEpic, iteration: state.iterationCount, error: epicStatusError || undefined });
   }
-  if (hitlEveryEpic && lastEpic !== null && currentEpic !== lastEpic) {
+  if (shouldHaltAtEpicTransition(hitlEveryEpic, lastEpic, currentEpic)) {
     log(`Epic-boundary HITL: ${lastEpic} → ${currentEpic} at iteration ${state.iterationCount}`)
     state.halts.push({ reason: 'epic_boundary', iteration: state.iterationCount, details: { from: lastEpic, to: currentEpic } });
     await writeState(state);

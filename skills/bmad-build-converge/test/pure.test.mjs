@@ -177,3 +177,37 @@ test('formatMRDescriptionPlaceholder handles kebab-suffix story keys', () => {
   assert.match(out, /Story 3-4-automatic-department-routing/);
   assert.match(out, /3-4-automatic-department-routing\.md/);
 });
+
+// ============================================================================
+// shouldAcceptStoryStatus(status) → boolean
+// Guard for converge setup: only certain statuses allow setup to proceed.
+// Accept: backlog (no spec yet — bmad-build-auto will create), ready-for-dev
+// (spec committed, ready to implement), in-progress (resume), review
+// (re-attempting after review). Reject: done, awaiting-operator, blocked.
+// Pure: single-status decision, no Workflow globals.
+// ============================================================================
+
+test('shouldAcceptStoryStatus accepts the 4 documented statuses', () => {
+  const fn = extractFunction(source, 'shouldAcceptStoryStatus');
+  assert.equal(fn('backlog'), true);
+  assert.equal(fn('ready-for-dev'), true);
+  assert.equal(fn('in-progress'), true);
+  assert.equal(fn('review'), true);
+});
+
+test('shouldAcceptStoryStatus rejects terminal/deferred statuses', () => {
+  const fn = extractFunction(source, 'shouldAcceptStoryStatus');
+  assert.equal(fn('done'), false);
+  assert.equal(fn('awaiting-operator'), false);
+  assert.equal(fn('blocked'), false);
+});
+
+test('shouldAcceptStoryStatus rejects unknown statuses (defensive)', () => {
+  const fn = extractFunction(source, 'shouldAcceptStoryStatus');
+  // Unknown status (typo, custom status) → reject (don't risk starting work on
+  // a story we don't understand).
+  assert.equal(fn('in_progress'), false);    // underscore variant — different
+  assert.equal(fn('reviewing'), false);
+  assert.equal(fn(''), false);
+  assert.equal(fn(undefined), false);
+});
