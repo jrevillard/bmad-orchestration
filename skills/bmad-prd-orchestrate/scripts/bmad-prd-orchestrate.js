@@ -686,7 +686,7 @@ while (state.storyQueue.length > 0) {
   // Epic = first dash-separated segment. storyQueue is in epic-order (L197-198), so
   // consecutive stories only share an epic when they belong to the same epic. First story sets the baseline (no halt).
   const currentEpic = extractEpicKey(sk);
-  if (lastEpic !== currentEpic) {
+  if (isEpicTransition(lastEpic, currentEpic)) {
     log(`Epic transition: ${lastEpic || '(start)'} → ${currentEpic} — marking epic as in-progress via bmad-issue-tracking-sync`)
     // Mark the new epic as in-progress on the issue tracker. First iteration
     // (lastEpic=null) marks the very first epic; subsequent transitions mark each
