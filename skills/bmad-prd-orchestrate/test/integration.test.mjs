@@ -32,25 +32,31 @@ function countMatches(source, regex) {
   return (source.match(regex) || []).length;
 }
 
-test('integration: orchestrator uses Workflow (capital W) at the dispatch site', () => {
+test('integration: orchestrator uses workflow (lowercase) at the dispatch site', () => {
   const src = readFileSync(ORCHESTRATOR_PATH, 'utf8');
-  // CRITICAL: lowercase `workflow({` (function-call shape) MUST NOT exist.
-  // The bug from 2026-09-12 was `await workflow({ scriptPath, args })` —
-  // lowercase workflow is undefined → TypeError → launch_failure on every story.
+  // The Workflow runtime exposes the sub-workflow dispatcher as `workflow`
+  // (lowercase). Capital-W `Workflow` is the main-conversation's tool —
+  // calling it from the orchestrator sub-workflow script throws
+  // `ReferenceError: Workflow is not defined`.
+  //
+  // Must have at least 1 lowercase `workflow({` (the real dispatch).
   const lowerCount = src.split('workflow({').length - 1;
-  assert.equal(lowerCount, 0,
-    `Lowercase 'workflow({' found (${lowerCount} matches) — ` +
-    `this is the bug from 2026-09-12. The Workflow runtime exports Workflow (capital W).`);
-  // Capital-W Workflow must exist at least once as a function call (with `{`).
+  assert.ok(lowerCount >= 1,
+    `workflow({ not found in orchestrator source — ` +
+    `Phase 3 dispatch is broken. The Workflow runtime exports workflow (lowercase).`);
+  // Must have ZERO capital-W `Workflow({` — that's the main-conversation tool,
+  // not callable from this context. (Mistakenly introduced 2026-09-12 by an
+  // over-eager fix; reverted immediately.)
   const upperCount = src.split('Workflow({').length - 1;
-  assert.ok(upperCount >= 1,
-    `Workflow({ (capital W) not found in orchestrator source. ` +
-    `The Phase 3 dispatch is broken. Found: ${upperCount} 'Workflow({'`);
+  assert.equal(upperCount, 0,
+    `Workflow({ (capital W) found (${upperCount} matches) — ` +
+    `this would throw ReferenceError. Use workflow (lowercase).`);
 });
 
 test('integration: build-converge does NOT call workflow() (recursive nesting risk)', () => {
   // build-converge runs INSIDE the Workflow runtime. If it tried to call
-  // workflow()/Workflow(), it would create infinite nesting.
+  // workflow()/Workflow(), it would create infinite nesting. Both cases
+  // (lowercase and capital-W) must be absent.
   const src = readFileSync(CONVERGE_PATH, 'utf8');
   const lowerCount = src.split('workflow({').length - 1;
   const upperCount = src.split('Workflow({').length - 1;
@@ -58,19 +64,51 @@ test('integration: build-converge does NOT call workflow() (recursive nesting ri
   assert.equal(upperCount, 0, `build-converge must not call Workflow() (recursive). Found: ${upperCount}`);
 });
 
-test('integration: orchestrator wraps dispatch with capital-W Workflow inside try/catch (defense)', () => {
-  // Verifies the launch_failure handler is in place around the Workflow call.
-  // The pre-fix crash happened because Workflow() threw TypeError — the
-  // try/catch captures it and routes to the launch_failure halt.
+test('integration: orchestrator wraps dispatch with workflow() inside try/catch (defense)', () => {
+  // Verifies the launch_failure handler is in place around the workflow()
+  // call. The try/catch captures any throw (TypeError, ReferenceError,
+  // network error, etc.) and routes to the launch_failure halt.
   const src = readFileSync(ORCHESTRATOR_PATH, 'utf8');
-  const workflowIdx = src.indexOf('await Workflow({');
-  assert.ok(workflowIdx > -1, 'No `await Workflow({` in source');
+  const workflowIdx = src.indexOf('await workflow({');
+  assert.ok(workflowIdx > -1, 'No `await workflow({` in source');
   // The catch block for launchError should be within a few hundred chars.
   const afterWorkflow = src.slice(workflowIdx, workflowIdx + 1500);
   assert.ok(afterWorkflow.includes('catch (') || afterWorkflow.includes('catch{'),
-    'No catch block found within 1500 chars of the Workflow() dispatch — ' +
-    'a throw from Workflow() would crash the orchestrator instead of triggering ' +
+    'No catch block found within 1500 chars of the workflow() dispatch — ' +
+    'a throw would crash the orchestrator instead of triggering ' +
     'the launch_failure handler.');
   assert.ok(afterWorkflow.includes('launchError'),
     'No launchError assignment in the catch block — the handler is missing');
+});
+
+test('integration: no other Workflow-tool global typos in either script', () => {
+  // For each script, verify the lowercase globals (canonical form) are
+  // present at least once as a function call (with `{`). Use string.indexOf
+  // — regex `\bname\s*\{` had bizarre Node behavior in earlier testing,
+  // indexOf is simpler and reliable.
+  //
+  // NOTE: `Workflow` (capital) is intentionally NOT in either list — it's
+  // a DIFFERENT function (the main-conversation tool) that throws if
+  // called from the sub-workflow context. Use `workflow` (lowercase).
+  for (const [path, label, expected] of [
+    [ORCHESTRATOR_PATH, 'orchestrator', ['workflow', 'agent', 'phase', 'log', 'writeState', 'appendJournal', 'loadState']],
+    // build-converge is the SUB-workflow — it doesn't call workflow() (would
+    // recurse). It uses agent() (and dispatchViaClaudeP internally) for sub-tasks.
+    [CONVERGE_PATH, 'build-converge', ['agent', 'dispatchViaClaudeP', 'phase', 'log']],
+  ]) {
+    const src = readFileSync(path, 'utf8');
+    for (const name of expected) {
+      // Use indexOf — count occurrences of `name(` in source. (Some
+      // globals like `agent` are called with `await agent(\n  \`template\``
+      // — newline between paren and template — so don't require `{`.)
+      const pattern = `${name}(`;
+      let count = 0, idx = 0;
+      while ((idx = src.indexOf(pattern, idx)) !== -1) {
+        count++;
+        idx += pattern.length;
+      }
+      assert.ok(count >= 1,
+        `${label}: expected at least 1 call to ${name}(), found ${count}`);
+    }
+  }
 });
