@@ -224,6 +224,20 @@ function safeInferredForDeps(stateObj, fallback) {
   return [];
 }
 
+// isConverged(convergeResult) → boolean
+// Returns true if the converge sub-workflow successfully merged the story —
+// either via the normal converged flag OR via an explicit merge.merged=true
+// when the build phase was skipped (branch already had commits ahead).
+// Without this, the orchestrator blocks successful merges that bypass the
+// convergence loop (e.g. when mr-create finds existing commits and merges
+// directly). Pure: boolean derivation from result shape.
+function isConverged(convergeResult) {
+  if (!convergeResult) return false;
+  if (convergeResult.converged === true) return true;
+  if (convergeResult.merge && convergeResult.merge.merged === true) return true;
+  return false;
+}
+
 // parseMaxRetries(rawValue) → integer
 // Parses the args.maxRetries arg. Default 3. 0 = never retry. Negative or
 // unparseable → fall back to default (defensive). Pure — no Workflow globals.
@@ -1047,13 +1061,14 @@ ${bashReadCmd}`,
   }
 
   // Apply result
-  if (convergeResult.converged) {
+  if (isConverged(convergeResult)) {
     state.completed.push(sk);
     // Cleanup: converged story may be stale-pending in blocked/halts from
     // an earlier failure. removeFromState keeps state consistent with reality.
     state = removeFromState(state, sk);
-    log(`Story ${sk} converged (iter ${convergeResult.iterations}, finalSha=${(convergeResult.finalSha || '').substring(0, 7)})`)
-    await appendJournal({ event: 'converged', storyKey: sk, iteration: state.iterationCount, iterations: convergeResult.iterations });
+    const convergedVia = convergeResult.converged === true ? 'converged' : 'merge';
+    log(`Story ${sk} converged via ${convergedVia} (iter ${convergeResult.iterations || 0}, finalSha=${(convergeResult.finalSha || '').substring(0, 7)})`)
+    await appendJournal({ event: 'converged', storyKey: sk, iteration: state.iterationCount, via: convergedVia });
   } else {
     state.blocked.push({ story: sk, reason: convergeResult.escalateReason || 'not_converged' });
     log(`Story ${sk} blocked: ${convergeResult.escalateReason || 'not_converged'}`)

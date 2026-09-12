@@ -579,6 +579,53 @@ test('safeInferredForDeps coerces non-array inferred to empty', () => {
 });
 
 // ============================================================================
+// isConverged(convergeResult) → boolean
+// Returns true if sub-workflow merged the story — either via converged:true
+// or via merge.merged:true (build phase skipped because branch had commits).
+// Without this, the orchestrator blocks successful merges that bypassed
+// the convergence loop. Pure: boolean derivation.
+// ============================================================================
+
+test('isConverged returns true when converged is true', () => {
+  const fn = extractFunction(source, 'isConverged');
+  assert.equal(fn({ converged: true }), true);
+  assert.equal(fn({ converged: true, iterations: 3, finalSha: 'abc123' }), true);
+});
+
+test('isConverged returns true when merge.merged is true (even if converged false)', () => {
+  const fn = extractFunction(source, 'isConverged');
+  // Build phase skipped → converged=false, but merge.merged=true (branch had commits).
+  const result = { converged: false, merge: { merged: true, sprintStatusDone: true } };
+  assert.equal(fn(result), true);
+});
+
+test('isConverged returns false when converged false and merge not merged', () => {
+  const fn = extractFunction(source, 'isConverged');
+  assert.equal(fn({ converged: false }), false);
+  assert.equal(fn({ converged: false, merge: { merged: false, error: 'x' } }), false);
+});
+
+test('isConverged returns false when merge.merged is missing', () => {
+  const fn = extractFunction(source, 'isConverged');
+  // No merge field at all → not converged.
+  const result = { converged: false, setup: {}, mr: {} };
+  assert.equal(fn(result), false);
+});
+
+test('isConverged returns false for null/undefined', () => {
+  const fn = extractFunction(source, 'isConverged');
+  assert.equal(fn(null), false);
+  assert.equal(fn(undefined), false);
+});
+
+test('isConverged requires merge.merged to be strictly true', () => {
+  const fn = extractFunction(source, 'isConverged');
+  // Truthy non-true values should still be treated as false.
+  assert.equal(fn({ converged: false, merge: { merged: 'true' } }), false);  // string 'true'
+  assert.equal(fn({ converged: false, merge: { merged: 1 } }), false);
+});
+
+// ============================================================================
 // buildHaltContext(reason, details, story, iterationCount, userOptions, extras)
 // Returns the standard halt payload the orchestrator returns to the Workflow
 // runtime. Shape:
