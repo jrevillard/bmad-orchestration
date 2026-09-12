@@ -359,3 +359,44 @@ test('buildMergeCheckCommand falls back to repoRoot when prdWorktreePath missing
   // Should use repoRoot as the cwd for git commands.
   assert.match(cmd, /git -C '\/home\/user\/repo'/);
 });
+
+// ============================================================================
+// shouldShortCircuitOnAlreadyMerged(stdout) → boolean
+// Pure decision: true iff stdout is exactly 'MERGED' (trimmed). Used by
+// build-converge's early-return-when-already-merged path. Extracted so the
+// agent()-call path can be unit-tested without mocking the Workflow
+// runtime. Tests cover all the edge cases the reviewer flagged.
+// ============================================================================
+
+test('shouldShortCircuitOnAlreadyMerged returns true for exact MERGED', () => {
+  const fn = extractFunction(source, 'shouldShortCircuitOnAlreadyMerged');
+  assert.equal(fn('MERGED'), true);
+});
+
+test('shouldShortCircuitOnAlreadyMerged returns true for MERGED with whitespace', () => {
+  const fn = extractFunction(source, 'shouldShortCircuitOnAlreadyMerged');
+  assert.equal(fn('MERGED\n'), true);
+  assert.equal(fn(' MERGED '), true);
+  assert.equal(fn('MERGED\r\n'), true);
+});
+
+test('shouldShortCircuitOnAlreadyMerged returns false for OPEN', () => {
+  const fn = extractFunction(source, 'shouldShortCircuitOnAlreadyMerged');
+  assert.equal(fn('OPEN'), false);
+  assert.equal(fn('OPEN\n'), false);
+});
+
+test('shouldShortCircuitOnAlreadyMerged returns false for non-string inputs (the crash case)', () => {
+  const fn = extractFunction(source, 'shouldShortCircuitOnAlreadyMerged');
+  // These are the exact shapes that crashed build-converge pre-fix
+  // (when dispatchViaClaudeP without schema returned {error: '...'}).
+  // After the fix (agent() with schema + shouldShortCircuitOnAlreadyMerged
+  // guard), these all return false → no short-circuit → fall through.
+  assert.equal(fn(undefined), false);
+  assert.equal(fn(null), false);
+  assert.equal(fn({ stdout: 'MERGED' }), false);  // object, not string
+  assert.equal(fn({ error: 'claude -p envelope missing structured_output' }), false);
+  assert.equal(fn(123), false);
+  assert.equal(fn(true), false);
+  assert.equal(fn(''), false);
+});

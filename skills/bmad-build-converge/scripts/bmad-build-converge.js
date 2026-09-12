@@ -228,6 +228,18 @@ function buildMergeCheckCommand(setup) {
     `git -C '${cwd}' merge-base --is-ancestor 'origin/${safeStory}' 'origin/${safeBase}' && echo MERGED || echo OPEN`;
 }
 
+// shouldShortCircuitOnAlreadyMerged(stdout) → boolean
+// Pure: returns true iff the merge-check agent's stdout is exactly 'MERGED'
+// (trimmed). Anything else (OPEN, undefined, error shape, null,
+// empty string) returns false — build-converge falls through to the
+// normal convergence loop. Pure decision; no side effects. Extracted
+// so the call path's edge cases are unit-testable without mocking the
+// Workflow runtime's agent() global.
+function shouldShortCircuitOnAlreadyMerged(stdout) {
+  if (typeof stdout !== 'string') return false;
+  return stdout.trim() === 'MERGED';
+}
+
 function base64Encode(input) {
   const bytes = [];
   for (let i = 0; i < input.length; i++) {
@@ -628,7 +640,7 @@ if (mergeCheckCmd) {
     log(`merge-check agent failed: ${e} — falling through to convergence loop`)
     mergeCheckResult = null;
   }
-  if (mergeCheckResult && typeof mergeCheckResult.stdout === 'string' && mergeCheckResult.stdout.trim() === 'MERGED') {
+  if (shouldShortCircuitOnAlreadyMerged(mergeCheckResult?.stdout)) {
     log(`Branch already merged into ${setup.baseBranch} — skipping build loop`)
     return {
       storyKey: setup.storyKey,
