@@ -209,6 +209,21 @@ function parseDispatchEnvelope(stdoutText) {
   return envelope.structured_output;
 }
 
+// buildMergeCheckCommand(setup) → string
+// Pure: returns the bash command to check if origin/<storyBranch> is already
+// an ancestor of origin/<baseBranch> (i.e. branch was merged). Caller
+// executes via dispatchViaClaudeP (the established agent transport).
+// Lives in build-converge.js (not shared lib — Workflow-tool JS files
+// can't import each other per `tout dans le même fichier` constraint).
+function buildMergeCheckCommand(setup) {
+  if (!setup || !setup.baseBranch || !setup.storyBranch) return '';
+  const cwd = setup.prdWorktreePath || setup.repoRoot || '';
+  // Fetch both refs (cheap, idempotent), then `merge-base --is-ancestor` exits 0
+  // if origin/<storyBranch> is reachable from origin/<baseBranch>.
+  return `git -C '${cwd}' fetch origin '${setup.baseBranch}' '${setup.storyBranch}' >/dev/null 2>&1; ` +
+    `git -C '${cwd}' merge-base --is-ancestor 'origin/${setup.storyBranch}' 'origin/${setup.baseBranch}' && echo MERGED || echo OPEN`;
+}
+
 function base64Encode(input) {
   const bytes = [];
   for (let i = 0; i < input.length; i++) {
@@ -577,6 +592,40 @@ let iterationsLog = [];
 // blocked). Skill may finalize spec status to one of these if human
 // action is required or an unresolved issue blocked completion.
 let lastSpecStatus = null;
+
+// ALREADY-MERGED SHORTCUT: detect if the branch was merged externally (operator
+// clicked "Merge" via UI, or a previous run already merged). If origin/<storyBranch>
+// is an ancestor of origin/<baseBranch>, the branch's commits are already in
+// base — skip the build loop entirely and return converged:true. This handles
+// the common case after resume + manual merge, where mr-create finds existing
+// commits ahead and skips the convergence loop (which would otherwise return
+// converged:false because no new build iterations ran).
+log(`Checking if branch ${setup.storyBranch} is already merged into ${setup.baseBranch}...`)
+const mergeCheckCmd = buildMergeCheckCommand(setup)
+if (mergeCheckCmd) {
+  const mergeCheck = await dispatchViaClaudeP({
+    label: `merge-check-${setup.storyKey}`,
+    phase: 'Build with convergence',
+    cwd: setup.worktreePath,
+    prompt: `Run this exact bash command. Return its stdout verbatim. Do NOT modify, summarize, or diagnose.\n\nCOMMAND:\n${mergeCheckCmd}`,
+    allowedTools: ['Bash'],
+  });
+  if ((mergeCheck || '').trim() === 'MERGED') {
+    log(`Branch already merged into ${setup.baseBranch} — skipping build loop`)
+    return {
+      storyKey: setup.storyKey,
+      converged: true,
+      iterations: 0,
+      finalSha: setup.baselineSha,
+      iterationsLog: [{ iteration: 0, note: 'branch already merged into base — convergence loop skipped' }],
+      setup,
+      mr: { mrIid: null, mrUrl: null, pipelineId: null, alreadyMerged: true },
+      monitor: { status: 'success', retries: 0, transient: false, failedJobs: [] },
+      merge: { merged: true, sprintStatusDone: false, error: null, alreadyMerged: true },
+      cleanup: { worktrees: [], branches: [], keptWorktrees: [], keptBranches: [], prunedRefs: 0, removedLogs: [], errors: [] },
+    }
+  }
+}
 
 // PHASE A: REVIEW CONVERGENCE LOOP
 // Build + postBuild + push. NO CI WAIT. If build wants followup, loop immediately

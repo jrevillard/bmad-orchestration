@@ -321,3 +321,41 @@ test('parseDispatchEnvelope skips non-JSON lines in NDJSON', () => {
   const out = fn(stdout);
   assert.deepEqual({...out}, { survived: true });
 });
+
+// ============================================================================
+// buildMergeCheckCommand(setup) → string
+// Returns the bash command to check if origin/<storyBranch> is an ancestor
+// of origin/<baseBranch> (i.e. branch was merged into base). Caller executes
+// via dispatchViaClaudeP. Pure: string construction, no I/O.
+// ============================================================================
+
+test('buildMergeCheckCommand includes merge-base --is-ancestor check', () => {
+  const fn = extractFunction(source, 'buildMergeCheckCommand');
+  const cmd = fn({
+    baseBranch: 'feat/test-loop-v2/prd',
+    storyBranch: 'feat/test-loop-v2/1-2-add-pyproject-toml',
+    prdWorktreePath: '/home/user/prd-worktree',
+  });
+  assert.match(cmd, /merge-base --is-ancestor/);
+  assert.match(cmd, /origin\/feat\/test-loop-v2\/1-2-add-pyproject-toml/);
+  assert.match(cmd, /origin\/feat\/test-loop-v2\/prd/);
+  assert.match(cmd, /echo MERGED \|\| echo OPEN/);
+});
+
+test('buildMergeCheckCommand returns empty string if baseBranch missing', () => {
+  const fn = extractFunction(source, 'buildMergeCheckCommand');
+  assert.equal(fn({ storyBranch: 'feat/x' }), '');
+  assert.equal(fn({ baseBranch: '', storyBranch: 'feat/x' }), '');
+  assert.equal(fn(null), '');
+});
+
+test('buildMergeCheckCommand falls back to repoRoot when prdWorktreePath missing', () => {
+  const fn = extractFunction(source, 'buildMergeCheckCommand');
+  const cmd = fn({
+    baseBranch: 'main',
+    storyBranch: 'feat/x',
+    repoRoot: '/home/user/repo',
+  });
+  // Should use repoRoot as the cwd for git commands.
+  assert.match(cmd, /git -C '\/home\/user\/repo'/);
+});
