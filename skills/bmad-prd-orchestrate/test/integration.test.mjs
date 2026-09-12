@@ -129,3 +129,31 @@ test('integration: Phase 4 sprint-status sync agent uses Skill: bmad-issue-track
   assert.ok(src.includes('labelsSynced'),
     'No labelsSynced field found — Phase 4 schema missing label-sync counter.');
 });
+
+test('integration: BOTH scripts end with top-level `return await main();` (not bare await)', () => {
+  // Regression guard: `await main();` DISCARDS the return value. The Workflow
+  // runtime wraps the script body in an async function and returns its last
+  // expression's value — a bare `await main()` yields `undefined`, which makes
+  // `workflow({scriptPath}, args)` return undefined and the orchestrator's
+  // `!convergeResult` guard fire a false launch_failure.
+  //
+  // The fix (2026-09-12) changed both scripts to `return await main();`.
+  // These two tests prevent a future "cleanup" from reverting to the bare form
+  // (which compiles fine and only fails at runtime).
+  for (const [path, label] of [
+    [ORCHESTRATOR_PATH, 'orchestrator'],
+    [CONVERGE_PATH, 'build-converge'],
+  ]) {
+    const src = readFileSync(path, 'utf8');
+    assert.ok(
+      /^return await main\(\);\s*$/m.test(src),
+      `${label}: missing top-level 'return await main();' — a bare 'await main();' `
+      + `discards the return value and breaks workflow({scriptPath}) dispatch.`
+    );
+    assert.ok(
+      !/^await main\(\);\s*$/m.test(src),
+      `${label}: found bare 'await main();' — its return value is discarded. `
+      + `Use 'return await main();'.`
+    );
+  }
+});

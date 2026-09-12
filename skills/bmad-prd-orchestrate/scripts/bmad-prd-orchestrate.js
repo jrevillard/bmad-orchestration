@@ -975,13 +975,12 @@ ${bashReadCmd}`,
   let launchError = null;
   try {
     // workflow(nameOrRef, args?) is a 2-arg call: first is the name/scriptPath ref,
-    // second is the args object. Passing args as a KEY inside the options object
-    // (e.g. workflow({scriptPath, args: {...}})) is silently ignored — the sub-workflow
-    // sees args=undefined and crashes on args.storyKey. NOTE: lowercase `workflow`
-    // is the global injected by the Workflow tool — capital-W `Workflow` is
-    // a DIFFERENT function (the main conversation's tool, not the sub-workflow
-    // dispatcher) and would throw ReferenceError here. (Caught 2026-09-12 with
-    // story 1-2: ReferenceError: Workflow is not defined.)
+    // second is the args object. Lowercase `workflow` is the runtime-injected
+    // sub-workflow dispatcher (`Workflow` capital-W is the main-conversation tool
+    // and throws ReferenceError here). It returns whatever the sub-workflow
+    // script returns — which REQUIRES the sub-workflow to end with a top-level
+    // `return await main();` (a bare `await main();` discards the value → this
+    // call yields undefined → false launch_failure below).
     convergeResult = await workflow({ scriptPath: convergeScriptPath }, {
       storyKey: sk,
       maxIterations,
@@ -992,11 +991,11 @@ ${bashReadCmd}`,
     launchError = String(e);
   }
 
-  // Handle launch failure (workflow() threw — infrastructure error, NOT a per-story issue).
-  // If one story fails to launch, the same scriptPath will fail for every subsequent
-  // story. Continuing just wastes N doomed sub-workflow attempts before the operator
-  // sees the real problem. Halt immediately so the operator can fix (missing script,
-  // wrong scriptPath, runtime crash) and resume.
+  // Handle launch failure — either workflow() threw (infrastructure error) OR it
+  // returned a falsy value (e.g. the sub-workflow's return value was discarded,
+  // or the sub-workflow crashed). Both mean we cannot proceed with this story.
+  // Continuing would waste N doomed sub-workflow attempts before the operator
+  // sees the real problem, so halt immediately.
   if (launchError || !convergeResult) {
     log(`Sub-workflow launch failed for ${sk}: ${launchError}`)
     state.blocked.push({ story: sk, reason: 'launch_failed', details: launchError });
@@ -1381,4 +1380,9 @@ return finalReport;
 
 };
 
-await main();
+// `return await main();` — TOP-LEVEL return is REQUIRED here.
+// The Workflow runtime wraps this script body in an async function; a bare
+// `await main();` discards main()'s return value. Top-level `return` is legal
+// at runtime but illegal in ESM — `node --check --input-type=module` flags it
+// (expected; see the sed-strip validation recipe in CLAUDE.md).
+return await main();

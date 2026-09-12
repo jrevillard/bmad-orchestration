@@ -40,23 +40,44 @@ The install drops copies into `.claude/skills/`, `.agents/skills/`, and other ag
 
 ## Pre-commit check
 
-Both scripts are wrapped in `const main = async () => { ... }; await main();` after `export const meta`. This pattern:
-- Makes top-level `await main()` legal in ESM (`--input-type=module` lets `node --check` pass with exit 0).
-- Wraps all `return` statements inside `main()` so they're inside an async function (legal in both Workflow runtime AND `node --check --input-type=module`).
-- Keeps sub-agents alive at runtime: the Workflow tool wraps the script body in `async () => { ... }`, so the top-level `await main()` suspends the wrapper until `main()` resolves. Spawning `void (async () => { ... })();` would return synchronously → Workflow wrapper resolves → tear down → sub-agents killed ~26ms after spawn.
+Both scripts end with `const main = async () => { ... };` followed by a **top-level
+`return await main();`**. This pattern is governed by two hard runtime constraints:
 
-Pre-commit validation:
+- **Top-level `return` is REQUIRED.** The Workflow runtime wraps the script body in an
+  async function; the wrapper's return value is what the caller's
+  `workflow({ scriptPath }, args)` receives. A bare `await main();` **discards**
+  `main()`'s return value → callers get `undefined` → the orchestrator's
+  `!convergeResult` guard fires a false `launch_failure`. Top-level `return` is legal
+  at runtime but **illegal in ESM**, so `node --check` will always flag it.
+- **`void (async () => { ... })();` is FORBIDDEN.** It returns synchronously, so the
+  Workflow wrapper resolves immediately → sub-agents torn down ~26ms after spawn.
+  `return await main()` keeps the wrapper suspended until `main()` resolves.
+
+Because top-level `return` can't pass `node --check`, validate by stripping that one
+line for the syntax check:
 
 ```bash
-node --check --input-type=module < skills/bmad-prd-orchestrate/scripts/bmad-prd-orchestrate.js
-node --check --input-type=module < skills/bmad-build-converge/scripts/bmad-build-converge.js
+for f in skills/bmad-prd-orchestrate/scripts/bmad-prd-orchestrate.js \
+         skills/bmad-build-converge/scripts/bmad-build-converge.js; do
+  sed 's/^return await main();$/await main();/' "$f" | node --check --input-type=module
+done
 ```
 
-Exit 0 = parse OK, safe to commit. CI does not run on this repo; this manual check is the only gate. For all other `.js` files in the repo, plain `node --check <file>` is fine.
+Exit 0 = the body parses (the top-level `return` is intentional and checked by the
+integration test). CI does not run on this repo; this manual check + `node --test` are
+the gates. For all other `.js` files in the repo, plain `node --check <file>` is fine.
 
 ## Known gotchas (in-flight)
 
-- **Wrap pattern is fixed.** `const main = async () => { ... }; await main();` after `export const meta` in both scripts. Do NOT replace with `void (async () => { ... })();` — that returns synchronously and the Workflow tool tears down sub-agents ~26ms after spawn. The `await main()` at top level keeps the Workflow tool's wrapper suspended until main resolves, so sub-agents (setup agent in particular) stay alive.
+- **`return await main();` — never a bare `await main();`.** The bare form compiles and
+  looks harmless but silently discards the return value; the failure only shows at
+  runtime as a false `launch_failure`. Guarded by a source-grep test in
+  `test/integration.test.mjs`.
 - **Unescaped backticks inside template literals.** `bmad-prd-orchestrate.js` agent prompts use template literals that reference shell commands. Backticks inside an agent-prompt template literal MUST be escaped as `\`` (same as every other shell-command reference in the same prompt) — otherwise they close the outer literal early and the JS parser fails on `missing ) after argument list`.
 - **MR create flow assumes `find-mr` succeeds after `ensure-mr`.** The atomic `ensure-mr` returns no `mr_iid` (per its YAML header), so the orchestrator's mr-create agent follows up with `BMAD_MR_ACTION=find-mr` to resolve it. Don't skip the find-mr call.
 - **First-pipeline race.** `get-mr-pipeline` immediately after MR creation may return empty (pipeline not yet triggered by push). Treated as "no pipeline yet" (`pipelineId=0`, `pipelineStatus="none"`) — CI loop picks up the real pipeline on next poll.
+- **Workflow-tool globals are runtime-injected, not imports.** `agent`, `phase`, `log`,
+  `workflow`, `args`, `writeState`, `appendJournal` exist only inside the Workflow
+  runtime. The sub-workflow dispatch global is lowercase `workflow(nameOrRef, args?)`
+  (2-arg form). `Workflow` (capital W) is the main-conversation tool and throws
+  `ReferenceError` from inside a workflow script.

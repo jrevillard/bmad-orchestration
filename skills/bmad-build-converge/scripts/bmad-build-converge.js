@@ -1099,4 +1099,12 @@ return {
 
 };
 
-await main();
+// `return await main();` — TOP-LEVEL return is REQUIRED here.
+// The Workflow runtime wraps this script body in an async function; the wrapper's
+// return value is what the orchestrator's sub-workflow dispatch receives. A bare
+// `await main();` DISCARDS main()'s return value → callers get `undefined` →
+// the orchestrator's `!convergeResult` guard fires → false launch_failure.
+// Top-level `return` is legal at runtime (body is wrapped in an async fn) but
+// illegal in ESM — so `node --check --input-type=module` will flag it. That is
+// expected; validate with the sed-strip recipe in CLAUDE.md instead.
+return await main();
