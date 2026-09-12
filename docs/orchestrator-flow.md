@@ -1,5 +1,15 @@
 # Orchestrator flow — reference diagrams
 
+> **Important context** : these diagrams document the **JS orchestrator**
+> (`skills/bmad-prd-orchestrate/scripts/bmad-prd-orchestrate.js` +
+> `skills/bmad-build-converge/scripts/bmad-build-converge.js`). They describe
+> the live-test harness used to run bmad-orchestration workflows. They
+> are **NOT** documentation of `bmad-loop`'s behavior. bmad-loop is a
+> separate Python-based orchestrator with a different architecture
+> (flat state machine, no sub-workflow, no remote push, no issue label
+> sync). See the "bmad-loop comparison" callouts in each diagram for
+> the key differences.
+
 These diagrams capture the **expected behavior** at every step. Use them when
 debugging or refactoring — any drift between the diagrams and the code is a
 bug. All diagrams are Mermaid (GitHub-renderable, no extra tooling).
@@ -83,9 +93,30 @@ sequenceDiagram
 3. **build-converge merge-check uses `git merge-base --is-ancestor`**, then
    case-insensitive check on stdout (`MERGED` / `merged`).
 4. **Each story's spec file lives in `_bmad-output/implementation-artifacts/stories/<key>.md`**.
-5. **Phase 4 labels sync is REQUIRED**, not optional — without it, completed
-   stories stay labeled `status:backlog` while YAML says `done` (the bug we
-   fixed).
+5. **Phase 4 labels sync is implemented but soft-fails per-entity** — the PRD
+   never halts on label-sync. Without it, completed stories stay labeled
+   `status:backlog` while YAML says `done` (the bug we fixed).
+
+### bmad-loop comparison
+
+bmad-loop uses a fundamentally different architecture (flat state machine,
+not a sub-workflow):
+- No `Workflow()` sub-workflow dispatch — bmad-loop invokes `bmad-build-auto`
+  Skill directly per story.
+- No `state.halts[]` array — uses single `paused_reason: str | None` field.
+- Resume does NOT re-pause (single-pause-state semantics).
+- No `git push origin` — bmad-loop merges per-story commits locally back to
+  the target branch (never touches the remote).
+- No issue label sync — bmad-issue-tracking's CLAUDE.md explicitly states
+  bmad-loop bypasses the manual branch/MR flow.
+- No `phase4_sprint_status_sync` event — bmad-loop terminates with
+  `journal.append("run-complete")`.
+- No `ESCALATED`, `AWAITING_OPERATOR`, `DEFERRED` etc. as separate states.
+- Phase enum differs entirely (`PENDING`, `DEV_RUNNING`, `DEV_VERIFY`,
+  `REVIEW_RUNNING`, `REVIEW_VERIFY`, `COMMITTING`, `DONE`, etc.).
+
+See `bmad-loop/src/bmad_loop/model.py` for the actual reference phase enum
+and pause state fields.
 
 ## 2. Per-story lifecycle (orchestrator's per-story loop)
 
