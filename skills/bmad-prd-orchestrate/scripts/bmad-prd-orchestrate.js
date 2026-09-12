@@ -106,6 +106,22 @@ function findUnmetDeps(deps, depStatuses) {
   return deps.filter(d => (depStatuses || {})[d] !== 'done');
 }
 
+// normalizeStateArrays(state) → state with every collection field guaranteed to be
+// an array. Three sources can omit a field: state.json written by an older version,
+// an agent-authored write, and a helper that rebuilt the object. A missing field is
+// not a soft degradation — it is a TypeError on first use (state.skipped.push).
+// Applied at each point where state is replaced, so the invariant lives in one place.
+// Pure and self-contained so the test harness can extract it in isolation
+// (test/pure.test.mjs) — do not hoist the list to a module const.
+function normalizeStateArrays(state) {
+  const fields = ['storyQueue', 'completed', 'blocked', 'skipped', 'awaitingOperator', 'halts'];
+  const out = { ...state };
+  for (const k of fields) {
+    if (!Array.isArray(out[k])) out[k] = [];
+  }
+  return out;
+}
+
 // applyUserChoice(planResult, userChoice, confirmedDeps) → { planResult, halt }
 // Pure transformation of a halted run's planResult based on the operator's
 // userChoice. Returns the new planResult + whether to halt (abort_prd only).
@@ -736,7 +752,13 @@ STEPS:
 // references to closure-scoped state — unit-testable via test/pure.test.mjs.
 function requeueCIHardfails(state, maxRetries) {
   if (maxRetries <= 0) return { state, count: 0 };
+  // ...state is LOAD-BEARING, not tidiness. This used to rebuild the object with
+  // only storyQueue/completed/blocked/halts, and the caller assigns the result back
+  // to the live state — so skipped, awaitingOperator, inferred, iterationCount,
+  // prdKey and ts were silently dropped on every resume, and the next
+  // `state.skipped.push(...)` died with "undefined is not an object".
   const newState = {
+    ...state,
     storyQueue: [...state.storyQueue],
     completed: state.completed,
     blocked: state.blocked,
@@ -790,9 +812,7 @@ if (resume) {
     if (loaded && typeof loaded === 'object' && !loaded.missing) {
       state = { ...state, ...loaded };
       // Defensive: ensure all collection fields stay arrays (disk state may be missing fields)
-      for (const k of ['storyQueue', 'completed', 'blocked', 'skipped', 'awaitingOperator', 'halts']) {
-        if (!Array.isArray(state[k])) state[k] = []
-      }
+      state = normalizeStateArrays(state);
       log(`Resumed from ${resume}: queueSize=${state.storyQueue.length} completed=${state.completed.length} blocked=${state.blocked.length} iterationCount=${state.iterationCount}`)
     } else {
       log(`WARNING: resume=${resume} but loadState returned no usable data; proceeding with fresh state`)
@@ -804,6 +824,10 @@ if (resume) {
   // Auto-requeue CI hard-fail halts per retryPolicy, BEFORE userChoice processing
   // so the operator's userChoice can still override (e.g. abort_prd still wins).
   applyRequeueCIHardfails();
+  // Belt and braces: the requeue REPLACES state, so re-assert the array invariant
+  // after it. This is the exact line that undid the normalization above and crashed
+  // a live run with "undefined is not an object (evaluating 'state.skipped.push')".
+  state = normalizeStateArrays(state);
 
   // Apply userChoice (periodic HITL options)
   if (userChoice === 'continue') {

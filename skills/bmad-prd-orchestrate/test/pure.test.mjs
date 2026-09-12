@@ -929,3 +929,56 @@ test('userOptionsForHaltReason knows state_write_failed', () => {
   // deepEqual would fail on prototype identity (same idiom as the other tests here).
   assert.deepEqual([...fn('state_write_failed')], ['continue', 'abort_prd']);
 });
+
+test('requeueCIHardfails preserves every state field', () => {
+  // Regression: the caller assigns the result back to the live state, so a rebuild
+  // that kept only storyQueue/completed/blocked/halts dropped skipped and
+  // awaitingOperator — and the next state.skipped.push threw
+  // "undefined is not an object". Reproduced a live run crash.
+  const fn = extractFunction(SCRIPT_SOURCE, 'requeueCIHardfails');
+  const state = {
+    storyQueue: ['2-1'],
+    completed: ['1-1'],
+    blocked: [{ story: '1-2', reason: 'ci_hardfail' }],
+    skipped: [{ story: '1-9', reason: 'unmet_deps' }],
+    awaitingOperator: [{ story: '1-8' }],
+    halts: [{ reason: 'ci_hardfail', story: '1-2', retries: 0 }],
+    inferred: [{ story: '2-1', depends_on: [] }],
+    iterationCount: 7,
+    prdKey: 'test-loop-v2',
+    ts: '20260912-101841',
+    runId: 'r1',
+  };
+  const { state: out, count } = fn(state, 3);
+  assert.equal(count, 1, 'the ci_hardfail story should be re-queued once');
+  for (const k of ['skipped', 'awaitingOperator', 'inferred', 'iterationCount', 'prdKey', 'ts', 'runId']) {
+    assert.ok(k in out && out[k] !== undefined,
+      `${k} was dropped by requeueCIHardfails — the next push on it throws`);
+  }
+  assert.deepEqual([...out.skipped], [{ story: '1-9', reason: 'unmet_deps' }]);
+  // Field-by-field for halts: they are rebuilt inside the vm context, so their
+  // objects carry that realm's prototype and a strict deepEqual on them fails on
+  // prototype identity despite identical structure.
+  assert.equal(out.halts.length, 1);
+  assert.equal(out.halts[0].story, '1-2');
+  assert.equal(out.halts[0].reason, 'ci_hardfail');
+  assert.equal(out.halts[0].retries, 1, 'the retry counter must be incremented');
+  assert.equal(out.iterationCount, 7);
+  assert.equal(out.prdKey, 'test-loop-v2');
+  assert.equal(out.runId, 'r1');
+});
+
+test('normalizeStateArrays restores every missing collection field', () => {
+  const fn = extractFunction(SCRIPT_SOURCE, 'normalizeStateArrays');
+  const out = fn({ storyQueue: ['a'] });
+  for (const k of ['storyQueue', 'completed', 'blocked', 'skipped', 'awaitingOperator', 'halts']) {
+    assert.ok(Array.isArray(out[k]), `${k} must be an array after normalization`);
+  }
+  assert.equal(out.storyQueue.length, 1, 'existing entries must survive');
+});
+
+test('normalizeStateArrays replaces non-array values, not just missing ones', () => {
+  const fn = extractFunction(SCRIPT_SOURCE, 'normalizeStateArrays');
+  const out = fn({ skipped: null, awaitingOperator: 'nope', blocked: 'also wrong' });
+  assert.ok(Array.isArray(out.skipped) && Array.isArray(out.awaitingOperator) && Array.isArray(out.blocked));
+});
