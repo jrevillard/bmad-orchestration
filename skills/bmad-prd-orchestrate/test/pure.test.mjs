@@ -418,6 +418,167 @@ test('removeFromState preserves other state fields', () => {
 });
 
 // ============================================================================
+// pickReHaltReason(halts) → string
+// Returns the most recent halt reason (last entry in array — chronological).
+// Used by the resume-without-userChoice path to re-halt at the LATEST actual
+// halt instead of always dep_inference_confirm. Pure: string selection.
+// ============================================================================
+
+test('pickReHaltReason returns last halt reason (most recent)', () => {
+  const fn = extractFunction(source, 'pickReHaltReason');
+  const halts = [
+    { reason: 'dep_inference_confirm', story: null },
+    { reason: 'launch_failure', story: '1-2', iteration: 2 },
+    { reason: 'ci_hardfail', story: '1-3', iteration: 3 },
+  ];
+  assert.equal(fn(halts), 'ci_hardfail');
+});
+
+test('pickReHaltReason falls back to dep_inference_confirm on empty halts', () => {
+  const fn = extractFunction(source, 'pickReHaltReason');
+  assert.equal(fn([]), 'dep_inference_confirm');
+  assert.equal(fn(null), 'dep_inference_confirm');
+  assert.equal(fn(undefined), 'dep_inference_confirm');
+});
+
+test('pickReHaltReason handles halt entries without reason field', () => {
+  const fn = extractFunction(source, 'pickReHaltReason');
+  // Last entry has no reason → falls back.
+  const halts = [{ reason: 'launch_failure' }, { /* no reason */ }];
+  assert.equal(fn(halts), 'dep_inference_confirm');
+});
+
+// ============================================================================
+// userOptionsForHaltReason(reason) → string[]
+// Maps halt reason to its appropriate userOptions list. dep_inference_confirm
+// has a custom 3-option list (confirm_deps/proceed_without_inference/abort_prd);
+// all other error halts share the 5-option list (continue/retry_blocked/
+// skip_blocked/abort_prd/fix_then_resume).
+// ============================================================================
+
+test('userOptionsForHaltReason returns dep_inference-specific list for dep_inference_confirm', () => {
+  const fn = extractFunction(source, 'userOptionsForHaltReason');
+  const out = fn('dep_inference_confirm');
+  assert.deepEqual([...out], ['confirm_deps', 'proceed_without_inference', 'abort_prd']);
+});
+
+test('userOptionsForHaltReason returns 5-option list for error halts', () => {
+  const fn = extractFunction(source, 'userOptionsForHaltReason');
+  for (const reason of ['launch_failure', 'ci_hardfail', 'merge_blocked', 'merge_conflict', 'epic_boundary', 'final_complete']) {
+    const out = fn(reason);
+    assert.deepEqual([...out], ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'], `for reason ${reason}`);
+  }
+});
+
+test('userOptionsForHaltReason falls back to 5-option list for unknown reason', () => {
+  const fn = extractFunction(source, 'userOptionsForHaltReason');
+  const out = fn('something_new_we_dont_know_about');
+  assert.deepEqual([...out], ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume']);
+});
+
+// ============================================================================
+// moveBlockedToSkipped(state) → state
+// On userChoice='skip_blocked': moves blocked stories to skipped[] and clears
+// blocked[]. Also drops matching halt entries. Pure: returns new state.
+// ============================================================================
+
+test('moveBlockedToSkipped moves blocked objects to skipped with reason', () => {
+  const fn = extractFunction(source, 'moveBlockedToSkipped');
+  const state = {
+    blocked: [
+      { story: '1-2', reason: 'launch_failure' },
+      { story: '2-3', reason: 'ci_hardfail' },
+    ],
+    halts: [{ reason: 'launch_failure', story: '1-2' }],
+    skipped: [],
+  };
+  const out = fn(state);
+  assert.equal(out.blocked.length, 0);
+  assert.equal(out.skipped.length, 2);
+  // Order: in input order. Use JSON round-trip to escape vm sandbox prototype
+  // (assert.deepEqual strict-equal checks prototypes; spread doesn't help for
+  // nested objects).
+  assert.equal(JSON.stringify(out.skipped[0]), JSON.stringify({ story: '1-2', reason: 'launch_failure' }));
+  assert.equal(JSON.stringify(out.skipped[1]), JSON.stringify({ story: '2-3', reason: 'ci_hardfail' }));
+  // Matching halt dropped.
+  assert.equal(out.halts.length, 0);
+});
+
+test('moveBlockedToSkipped handles string-form blocked entries', () => {
+  const fn = extractFunction(source, 'moveBlockedToSkipped');
+  const state = {
+    blocked: ['1-1', '2-1'],  // legacy string format
+    halts: [],
+    skipped: [],
+  };
+  const out = fn(state);
+  assert.equal(out.blocked.length, 0);
+  // String entries → reason undefined. JSON round-trip to escape vm sandbox
+  // prototypes for assert.deepEqual matching.
+  assert.equal(JSON.stringify(out.skipped), JSON.stringify([{ story: '1-1', reason: null }, { story: '2-1', reason: null }]));
+});
+
+test('moveBlockedToSkipped preserves non-matching halt entries', () => {
+  const fn = extractFunction(source, 'moveBlockedToSkipped');
+  const state = {
+    blocked: [{ story: '1-1', reason: 'launch_failure' }],
+    halts: [
+      { reason: 'launch_failure', story: '1-1' },   // should be dropped
+      { reason: 'ci_hardfail', story: '2-2' },     // preserved (different story)
+    ],
+    skipped: [],
+  };
+  const out = fn(state);
+  assert.equal(out.halts.length, 1);
+  assert.equal(out.halts[0].story, '2-2');
+});
+
+test('moveBlockedToSkipped preserves existing skipped entries', () => {
+  const fn = extractFunction(source, 'moveBlockedToSkipped');
+  const state = {
+    blocked: [{ story: '1-2', reason: 'launch_failure' }],
+    skipped: [{ story: '9-9', reason: 'done' }],
+    halts: [],
+  };
+  const out = fn(state);
+  assert.equal(out.skipped.length, 2);
+  // Existing entry preserved, new one appended.
+  assert.equal(out.skipped[0].story, '9-9');
+  assert.equal(out.skipped[1].story, '1-2');
+});
+
+// ============================================================================
+// safeInferredForDeps(stateObj, fallback) → array
+// Returns stateObj.inferred if defined, else fallback, else []. Defends
+// against JSON.stringify dropping an undefined key (deps.json = "{}").
+// ============================================================================
+
+test('safeInferredForDeps returns stateObj.inferred when defined', () => {
+  const fn = extractFunction(source, 'safeInferredForDeps');
+  const inferred = [{ story: '1-1', depends_on: [] }];
+  assert.deepEqual([...fn({ inferred }, [])], inferred);
+});
+
+test('safeInferredForDeps falls back to fallback when stateObj.inferred undefined', () => {
+  const fn = extractFunction(source, 'safeInferredForDeps');
+  const fallback = [{ story: '9-9', depends_on: [] }];
+  assert.deepEqual([...fn({}, fallback)], fallback);
+});
+
+test('safeInferredForDeps returns empty array when both undefined', () => {
+  const fn = extractFunction(source, 'safeInferredForDeps');
+  assert.deepEqual([...fn({}, null)], []);
+  assert.deepEqual([...fn({}, undefined)], []);
+});
+
+test('safeInferredForDeps coerces non-array inferred to empty', () => {
+  const fn = extractFunction(source, 'safeInferredForDeps');
+  // Defends against state.inferred being a non-array (corrupted disk state).
+  assert.deepEqual([...fn({ inferred: 'not-an-array' }, null)], []);
+  assert.deepEqual([...fn({ inferred: 42 }, null)], []);
+});
+
+// ============================================================================
 // buildHaltContext(reason, details, story, iterationCount, userOptions, extras)
 // Returns the standard halt payload the orchestrator returns to the Workflow
 // runtime. Shape:

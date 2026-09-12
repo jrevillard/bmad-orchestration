@@ -168,6 +168,62 @@ function removeFromState(state, storyKey) {
   };
 }
 
+// pickReHaltReason(halts) → string
+// Returns the most recent halt reason from state.halts (last entry in array —
+// halts are appended in chronological order). Falls back to 'dep_inference_confirm'
+// if no halts (rare edge case — fresh run that somehow ended up in resume path).
+// Pure: string selection, no side effects.
+function pickReHaltReason(halts) {
+  if (!Array.isArray(halts) || halts.length === 0) return 'dep_inference_confirm';
+  return halts[halts.length - 1].reason || 'dep_inference_confirm';
+}
+
+// userOptionsForHaltReason(reason) → string[]
+// Maps halt reason to its appropriate userOptions list. Most error halts
+// (launch_failure, ci_hardfail, merge_blocked, merge_conflict, epic_boundary,
+// final_complete) share the same 5-option list. dep_inference_confirm has
+// a custom 3-option list. Pure: lookup, no side effects.
+function userOptionsForHaltReason(reason) {
+  const byReason = {
+    dep_inference_confirm: ['confirm_deps', 'proceed_without_inference', 'abort_prd'],
+    launch_failure:       ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
+    ci_hardfail:          ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
+    merge_blocked:        ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
+    merge_conflict:       ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
+    epic_boundary:        ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
+    final_complete:       ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
+  };
+  return byReason[reason] || ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'];
+}
+
+// moveBlockedToSkipped(state) → state
+// On userChoice='skip_blocked': move all blocked stories to state.skipped[] and
+// clear state.blocked. Also drop matching halt entries (the halts that caused
+// the blocks are now resolved — operator chose skip). Pure: returns new state.
+function moveBlockedToSkipped(state) {
+  const skipped = (state.blocked || []).map(b => {
+    const bStory = typeof b === 'string' ? b : (b && b.story);
+    const bReason = typeof b === 'string' ? null : (b && b.reason);
+    return bStory ? { story: bStory, reason: bReason } : null;
+  }).filter(Boolean);
+  return {
+    ...state,
+    skipped: [...(state.skipped || []), ...skipped],
+    blocked: [],
+    halts: (state.halts || []).filter(h => !skipped.some(s => s.story === h.story)),
+  };
+}
+
+// safeInferredForDeps(stateObj, fallback) → array
+// Returns stateObj.inferred if defined, else fallback, else []. Defends
+// against JSON.stringify dropping an undefined key (which would silently
+// turn deps.json into '{}').
+function safeInferredForDeps(stateObj, fallback) {
+  if (stateObj && Array.isArray(stateObj.inferred)) return stateObj.inferred;
+  if (fallback && Array.isArray(fallback)) return fallback;
+  return [];
+}
+
 // parseMaxRetries(rawValue) → integer
 // Parses the args.maxRetries arg. Default 3. 0 = never retry. Negative or
 // unparseable → fall back to default (defensive). Pure — no Workflow globals.
@@ -441,14 +497,23 @@ if (userChoice) {
     await writeState(buildPlanState());
   }
 } else if (resume) {
-  // Resume token without userChoice → re-halt with current state
+  // Resume token without userChoice → re-halt with the LATEST halt from
+  // state.halts (not always dep_inference_confirm — the previous behavior
+  // re-halted dep_inference_confirm even when a launch_failure / ci_hardfail
+  // was the actual pending halt, leaving the operator no way to recover
+  // via skip_blocked / fix_then_resume). Pick the most recent halt entry
+  // (last in array — halts are appended in order); fall back to
+  // dep_inference_confirm if state.halts is empty (rare edge case).
   log(`Resume token provided but no userChoice; re-halting`)
   await writeState(buildPlanState())
+  const reHaltReason = pickReHaltReason(state.halts);
+  const userOptions = userOptionsForHaltReason(reHaltReason);
+  const latestHalt = (state.halts && state.halts.length > 0) ? state.halts[state.halts.length - 1] : null;
   return buildHaltContext(
-    'dep_inference_confirm',
-    { inferred: planResult.inferred, storyQueue: planResult.storyQueue },
-    timestamp, runDir, ['confirm_deps', 'proceed_without_inference', 'abort_prd']
-  )
+    reHaltReason,
+    { latestHalt, previousHalts: state.halts, inferred: planResult.inferred, storyQueue: planResult.storyQueue },
+    timestamp, runDir, userOptions
+  );
 } else if (inferDeps && !noInfer && !autoAcceptDeps && planResult.inferred.length > 0) {
   // First-run halt to confirm inferred graph
   log('Halting to confirm inferred dependency graph...')
@@ -507,13 +572,31 @@ async function writeState(stateObj) {
   // base64Encode (pure helper, test/pure.test.mjs) — NOT Buffer.from: Workflow
   // runtime has no `Buffer` global (no Node Buffer available). The pure helper
   // is the canonical implementation. Same encoding, runtime-safe.
+  // Defense: ensure state.inferred is always present. If undefined (e.g. an
+  // older disk state missing the field, or a caller that didn't pass it),
+  // JSON.stringify would silently drop the key → deps.json becomes "{}".
+  const inferredForDeps = safeInferredForDeps(stateObj, planResult.inferred);
   const stateB64 = base64Encode(JSON.stringify(stateObj));
-  const depsB64 = base64Encode(JSON.stringify({ inferred: stateObj.inferred }));
+  const depsB64 = base64Encode(JSON.stringify({ inferred: inferredForDeps }));
   const tmpState = `/tmp/bmad-orch-state-${writeStateCallSeq}.json`;
   const tmpDeps = `/tmp/bmad-orch-deps-${writeStateCallSeq}.json`;
-  const bashCmd = `mkdir -p '${runDir}' && echo '${stateB64}' | base64 -d > '${tmpState}.tmp' && mv '${tmpState}.tmp' '${runDir}/state.json' && echo '${depsB64}' | base64 -d > '${tmpDeps}.tmp' && mv '${tmpDeps}.tmp' '${runDir}/deps.json'`;
+  // Bash command writes state.json + deps.json atomically (.tmp + mv), then
+  // verifies the writes succeeded by cat-ing the files. The verification
+  // output prevents the LLM from hallucinating "written:false" when the
+  // files are actually written successfully (a previous false-negative bug
+  // where the agent reported `{"written":false,"path":"...tmp"}` despite
+  // the files existing on disk — caused the orchestrator to lose track of
+  // resume state). The cat outputs confirm file presence + content size;
+  // agent returns based on those.
+  const bashCmd = `mkdir -p '${runDir}' && echo '${stateB64}' | base64 -d > '${tmpState}.tmp' && mv '${tmpState}.tmp' '${runDir}/state.json' && echo '${depsB64}' | base64 -d > '${tmpDeps}.tmp' && mv '${tmpDeps}.tmp' '${runDir}/deps.json' && echo "VERIFY_STATE_BYTES=$(wc -c < '${runDir}/state.json')" && echo "VERIFY_DEPS_BYTES=$(wc -c < '${runDir}/deps.json')" && echo "VERIFY_STATE_HEAD=$(head -c 80 '${runDir}/state.json')"`;
   return await agent(
     `Run this exact bash command. Return its stdout verbatim. Do NOT modify, summarize, or diagnose.
+
+CRITICAL: After running, examine the VERIFY_STATE_BYTES and VERIFY_DEPS_BYTES output lines.
+- If VERIFY_STATE_BYTES is greater than 0 AND VERIFY_DEPS_BYTES is greater than 0 → return {"written": true, "path": "${runDir}/state.json"}.
+- If either is 0 or missing → return {"written": false, "path": "${runDir}/state.json"} and the verify output.
+
+DO NOT default to written:false when verify output shows non-zero bytes — the previous version of this prompt routinely hallucinated written:false despite successful writes.
 
 COMMAND:
 ${bashCmd}`,
@@ -646,7 +729,11 @@ if (resume) {
     state.blocked = [];
     log(`retry_blocked: re-queued ${blockedStories.length} blocked stories at front of queue`)
   } else if (userChoice === 'skip_blocked') {
-    log(`skip_blocked: leaving blocked as-is, continuing with remaining queue`)
+    // Move blocked stories to skipped[] (operator chose to skip, not retry).
+    // Without this, blocked[] stays populated even after the PRD completes,
+    // and the final state is inconsistent with reality.
+    state = moveBlockedToSkipped(state);
+    log(`skip_blocked: moved ${(state.skipped || []).length} blocked stories to skipped[]`)
   } else if (userChoice === 'abort_prd') {
     log('User aborted PRD; returning final report')
     await writeState(state);
