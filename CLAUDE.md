@@ -19,6 +19,10 @@ Both skills share the same module key (`bmad-orchestration`) and version (`1.0.0
 
 **Helper scripts** (`write-state.sh`, `orchestrate-helper.sh`, `ci-monitor.sh`) live in each skill's `scripts/` folder. Passed via `args.helpersDir` so the JS finds them at runtime regardless of install location. Each skill has its own copy (not shared) — keep them in sync if you edit one.
 
+## Flow reference diagrams
+
+**`docs/orchestrator-flow.md`** — Mermaid diagrams (GitHub-renderable) capturing the expected runtime behavior: end-to-end sequence, per-story lifecycle, halt/resume cycle, and Phase 4 sync. **Read these before changing orchestration logic** — any drift between the diagrams and the code is a bug. The diagrams document the **JS orchestrator** (this repo), NOT `bmad-loop` (a separate Python orchestrator — see the memory `bmad-orchestration-vs-bmad-loop`).
+
 ## Runtime dependency: `bmad-issue-tracking` module
 
 The orchestrator and converge scripts read `_bmad/custom/issue-tracking.yaml` (created by `bmad-issue-tracking-setup`). They dispatch MR/PR operations via `Skill: bmad-issue-tracking-sync` using `BMAD_MR_*` env vars (ACTION, SOURCE_BRANCH, TARGET_BRANCH, TITLE, DESCRIPTION_FILE, REPO, IID, SQUASH, PIPELINE_ID). The atomic contracts live in `bmad-issue-tracking-setup/assets/workflows/common/` (ensure-mr, find-mr, get-mr-pipeline, get-failed-jobs, merge-mr).
