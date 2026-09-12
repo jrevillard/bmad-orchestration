@@ -400,3 +400,79 @@ test('shouldShortCircuitOnAlreadyMerged returns false for non-string inputs (the
   assert.equal(fn(true), false);
   assert.equal(fn(''), false);
 });
+
+// ============================================================================
+// describeSchema + prompt/schema alignment guards
+// ============================================================================
+// Agent prompts render their field list with describeSchema(SCHEMA) instead of
+// hand-writing it, so evolving a schema cannot silently desync its prompt.
+// These guards fail the build if that link is broken again.
+const SCRIPT_SOURCE = readFileSync(SCRIPT_PATH, 'utf8');
+
+/** Extract a top-level `const NAME = { ... };` object literal from the source. */
+function extractObject(source, name) {
+  const m = source.match(new RegExp(`const\\s+${name}\\s*=\\s*\\{`));
+  if (!m) throw new Error(`const ${name} not found in script source`);
+  const start = source.indexOf('{', m.index);
+  let depth = 0; let i = start;
+  for (; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') { depth--; if (depth === 0) break; }
+  }
+  if (depth !== 0) throw new Error(`unbalanced braces in ${name}`);
+  return vm.runInNewContext(`(${source.slice(start, i + 1)})`, {}, { filename: `${name}.js` });
+}
+
+const SCHEMA_NAMES = [...SCRIPT_SOURCE.matchAll(/^const ([A-Z][A-Z_]*SCHEMA) = \{/gm)].map(m => m[1]);
+
+test('describeSchema renders name, type, required flag and description', () => {
+  const fn = extractFunction(SCRIPT_SOURCE, 'describeSchema');
+  const out = fn({
+    type: 'object',
+    properties: {
+      a: { type: 'string', description: 'first' },
+      b: { type: 'boolean' },
+      c: { type: 'array', items: { type: 'string' }, description: 'list' },
+    },
+    required: ['a', 'b'],
+  });
+  assert.equal(out, [
+    '  a (string) — first',
+    '  b (boolean)',
+    '  c (array<string>) [optional] — list',
+  ].join('\n'));
+});
+
+test('describeSchema handles a schema with no properties', () => {
+  const fn = extractFunction(SCRIPT_SOURCE, 'describeSchema');
+  assert.equal(fn({ type: 'object' }), '');
+  assert.equal(fn({ type: 'object', properties: {} }), '');
+});
+
+test('guard: no prompt tells the agent to return a NAMED schema', () => {
+  // Naming the const instead of listing fields is exactly the drift we removed:
+  // the agent either guesses or goes off to read the script (token cost, and
+  // impossible for tool-restricted agents with no Read/Bash).
+  assert.doesNotMatch(SCRIPT_SOURCE, /return\s+[A-Z][A-Z_]*SCHEMA/i,
+    'a prompt instructs the agent to return a schema by name — render it with describeSchema(<NAME>) instead');
+});
+
+test('guard: every schema const is rendered in a prompt or used as a nested schema', () => {
+  assert.ok(SCHEMA_NAMES.length > 0, 'no schema consts discovered — this guard is blind');
+  for (const name of SCHEMA_NAMES) {
+    const rendered = SCRIPT_SOURCE.includes(`describeSchema(${name})`);
+    const nested = SCRIPT_SOURCE.includes(`items: ${name}`);
+    assert.ok(rendered || nested,
+      `${name} is neither rendered by describeSchema() nor nested under items: — its prompt field list would drift from the schema`);
+  }
+});
+
+test('guard: every schema property has a description', () => {
+  for (const name of SCHEMA_NAMES) {
+    const schema = extractObject(SCRIPT_SOURCE, name);
+    for (const [prop, def] of Object.entries(schema.properties || {})) {
+      assert.ok(def.description && def.description.trim(),
+        `${name}.${prop} has no description — the generated prompt list would omit what the field means`);
+    }
+  }
+});

@@ -41,36 +41,30 @@ let ciFailure = args.ciFailure || null;
 // at the same scope as the loop (not inside it) so it survives loop exit.
 let lastCIStatus = null;
 
+// Schema `description` fields are NOT decorative: describeSchema() renders them
+// into the agent prompt, so each prompt's field list is generated from the
+// schema instead of being written by hand. Edit the schema, and the prompt
+// follows. Guarded by test/pure.test.mjs.
+
 const SETUP_SCHEMA = {
   type: 'object',
   properties: {
-    storyKey: { type: 'string' },
-    repoRoot: { type: 'string' },
-    prdWorktreePath: { type: 'string' },
-    prdKey: { type: 'string' },
-    baseBranch: { type: 'string' },
-    storyBranch: { type: 'string' },
-    worktreePath: { type: 'string' },
-    baselineSha: { type: 'string' },
-    resumedFromBranch: { type: 'boolean' },
-    sprintStatusUpdated: { type: 'boolean' },
-    sprintStatusPath: { type: 'string' },
-    specPath: { type: 'string' },
-    prdBranch: { type: 'string' },
-    // currentStatus: the development_status[storyKey] value the setup agent reads.
-    // Used post-setup by shouldAcceptStoryStatus() to gate the dispatch. If the
-    // status is 'done' / 'awaiting-operator' / 'blocked' / unknown, the
-    // dispatch halts instead of starting build for a story we shouldn't touch.
-    currentStatus: { type: 'string' },
-    // mrRepo = host + '/' + project from issue-tracking.yaml. Constructed by
-    // SETUP agent so downstream phases (mr-create) don't have to re-parse the
-    // config or re-read it from disk. Used as BMAD_MR_REPO for Skill: bmad-issue-tracking-sync.
-    mrRepo: { type: 'string' },
-    // issueStatusSynced: true when the setup agent transitioned the story's
-    // tracker issue to 'in-progress' via Skill: bmad-issue-tracking-sync.
-    // Soft-fail by design — false when the issue was missing or the Skill
-    // errored. Informational only; never blocks setup.
-    issueStatusSynced: { type: 'boolean' },
+    storyKey: { type: 'string', description: 'the story key this run was dispatched for' },
+    repoRoot: { type: 'string', description: 'step 1a — git rev-parse --show-toplevel' },
+    prdWorktreePath: { type: 'string', description: 'step 1b — worktree whose branch matches feat/*/prd' },
+    prdKey: { type: 'string', description: 'step 1b — the <prdKey> segment of that branch' },
+    baseBranch: { type: 'string', description: 'step 3 — feat/<prdKey>/prd' },
+    storyBranch: { type: 'string', description: 'step 2a — branch_patterns.story, interpolated' },
+    worktreePath: { type: 'string', description: 'step 6 — repoRoot/<worktree_base>/<storyBranch with slashes to dashes>' },
+    baselineSha: { type: 'string', description: 'step 5f — git rev-parse origin/<storyBranch>' },
+    resumedFromBranch: { type: 'boolean', description: 'step 5c/5d/5e — false when the story branch was created fresh' },
+    sprintStatusUpdated: { type: 'boolean', description: 'true once step 7 committed the in-progress write' },
+    sprintStatusPath: { type: 'string', description: 'step 4a — absolute path to sprint-status.yaml' },
+    specPath: { type: 'string', description: 'step 9 — computed path; the file is NOT written at setup' },
+    prdBranch: { type: 'string', description: 'same value as baseBranch' },
+    mrRepo: { type: 'string', description: 'step 2c — host/project from issue-tracking.yaml; used as BMAD_MR_REPO' },
+    currentStatus: { type: 'string', description: "step 7 — development_status[storyKey] BEFORE the update; drives the dispatch gate (shouldAcceptStoryStatus)" },
+    issueStatusSynced: { type: 'boolean', description: 'step 8 — false on soft-fail (issue missing or Skill errored)' },
   },
   required: ['storyKey', 'repoRoot', 'prdWorktreePath', 'prdKey', 'baseBranch', 'storyBranch',
              'worktreePath', 'baselineSha', 'resumedFromBranch', 'sprintStatusUpdated',
@@ -81,16 +75,16 @@ const SETUP_SCHEMA = {
 const BUILD_SCHEMA = {
   type: 'object',
   properties: {
-    storyKey: { type: 'string' },
-    iteration: { type: 'integer' },
-    newSha: { type: 'string' },
-    followupReviewRecommended: { type: 'boolean' },
-    patchesApplied: { type: 'integer' },
-    itemsDeferred: { type: 'integer' },
-    scoreFormula: { type: 'string' },
-    specStatus: { type: 'string' },
-    pushed: { type: 'boolean' },
-    error: { type: 'string' },
+    storyKey: { type: 'string', description: 'the story key' },
+    iteration: { type: 'integer', description: '1-based review-iteration counter' },
+    newSha: { type: 'string', description: 'final SHA after the push' },
+    followupReviewRecommended: { type: 'boolean', description: 'spec frontmatter followup_review_recommended' },
+    patchesApplied: { type: 'integer', description: "count parsed from the spec's '## Auto Run Result' section" },
+    itemsDeferred: { type: 'integer', description: "count parsed from the spec's '## Auto Run Result' section" },
+    scoreFormula: { type: 'string', description: "the score formula string from '## Auto Run Result'" },
+    specStatus: { type: 'string', description: 'spec frontmatter status (done | awaiting-operator | blocked)' },
+    pushed: { type: 'boolean', description: 'true after a successful push' },
+    error: { type: 'string', description: 'set only when the build could not complete' },
   },
   required: ['storyKey', 'iteration', 'newSha', 'followupReviewRecommended', 'specStatus', 'pushed'],
 };
@@ -98,15 +92,12 @@ const BUILD_SCHEMA = {
 const MERGE_SCHEMA = {
   type: 'object',
   properties: {
-    storyKey: { type: 'string' },
-    mrIid: { type: 'integer' },
-    merged: { type: 'boolean' },
-    sprintStatusDone: { type: 'boolean' },
-    // issueStatusSynced: true when the merge agent moved the story's tracker
-    // issue to status:done and closed it. Converge is the SOLE writer of the
-    // story done transition (see merge prompt). Soft-fail — never blocks merge.
-    issueStatusSynced: { type: 'boolean' },
-    error: { type: 'string' },
+    storyKey: { type: 'string', description: 'the story key' },
+    mrIid: { type: 'integer', description: 'IID of the MR being merged' },
+    merged: { type: 'boolean', description: 'true only when the merge call reported success' },
+    sprintStatusDone: { type: 'boolean', description: 'true when the sprint-status done write was pushed' },
+    issueStatusSynced: { type: 'boolean', description: 'true when the story issue was set to done and closed; converge is the sole writer of the story done transition; false on soft-fail' },
+    error: { type: 'string', description: 'reason when merged is false' },
   },
   required: ['storyKey', 'mrIid', 'merged', 'sprintStatusDone', 'issueStatusSynced'],
 };
@@ -114,16 +105,32 @@ const MERGE_SCHEMA = {
 const CLEANUP_SCHEMA = {
   type: 'object',
   properties: {
-    removedWorktrees: { type: 'array', items: { type: 'string' } },
-    deletedBranches: { type: 'array', items: { type: 'string' } },
-    keptWorktrees: { type: 'array', items: { type: 'string' } },
-    keptBranches: { type: 'array', items: { type: 'string' } },
-    prunedRefs: { type: 'integer' },
-    removedLogs: { type: 'array', items: { type: 'string' } },
-    errors: { type: 'array', items: { type: 'string' } },
+    removedWorktrees: { type: 'array', items: { type: 'string' }, description: 'story worktree paths removed' },
+    deletedBranches: { type: 'array', items: { type: 'string' }, description: 'branch names deleted' },
+    keptWorktrees: { type: 'array', items: { type: 'string' }, description: 'worktrees deliberately kept (uncommitted work or not ours)' },
+    keptBranches: { type: 'array', items: { type: 'string' }, description: 'branches deliberately kept' },
+    prunedRefs: { type: 'integer', description: 'count of pruned refs' },
+    removedLogs: { type: 'array', items: { type: 'string' }, description: 'log files deleted' },
+    errors: { type: 'array', items: { type: 'string' }, description: 'errors hit during cleanup; never fatal' },
   },
   required: ['removedWorktrees', 'deletedBranches', 'keptWorktrees', 'keptBranches', 'prunedRefs', 'removedLogs', 'errors'],
 };
+
+// describeSchema(schema) → the prompt-ready field list for a JSON schema.
+// Single source of truth for "what must this agent return": the prompt renders
+// this instead of hand-writing a field list, so a schema change cannot drift
+// away from its prompt. Duplicated in bmad-prd-orchestrate.js — Workflow-tool
+// scripts cannot import each other (same reason base64Encode is duplicated).
+function describeSchema(schema) {
+  const required = schema.required || [];
+  return Object.entries(schema.properties || {}).map(([name, prop]) => {
+    let type = prop.type || 'any';
+    if (type === 'array' && prop.items && prop.items.type) type = `array<${prop.items.type}>`;
+    const optional = required.includes(name) ? '' : ' [optional]';
+    const note = prop.description ? ` — ${prop.description}` : '';
+    return `  ${name} (${type})${optional}${note}`;
+  }).join('\n');
+}
 
 
 // ============================================================================
@@ -450,7 +457,7 @@ STEPS:
       - branch_patterns.prd: "feat/{prd_key}/prd"
       - branch_patterns.story: "feat/{prd_key}/{story_key}"
    b. Verify prdKey from step 1b matches the project's git remote: \`git -C repoRoot remote -v\`. The remote URL host should match config host.
-   c. Construct mrRepo = host + '/' + project (e.g. opensource.unicc.org/un/itu/genie-ai). This is the value the Skill: bmad-issue-tracking-sync expects in BMAD_MR_REPO. Return it as mrRepo in SETUP_SCHEMA so downstream phases (mr-create) can use it directly.
+   c. Construct mrRepo = host + '/' + project (e.g. opensource.unicc.org/un/itu/genie-ai). This is the value the Skill: bmad-issue-tracking-sync expects in BMAD_MR_REPO. Return it as mrRepo so downstream phases (mr-create) can use it directly.
 3. baseBranch = worktree_base-style interpolation: feat/<prd_key>/prd (matches the existing PRD branch you found).
 4. Confirm story is ready:
    a. sprintStatusPath = prdWorktreePath + '/_bmad-output/implementation-artifacts/sprint-status.yaml'.
@@ -494,25 +501,10 @@ STEPS:
    NOTE: this is the ONLY place a story issue moves to in-progress. The converge
    merge agent later moves it to done + closes it. Without this step the story
    issue stays status:backlog for the entire build (the gap this step closes).
-9. (NO spec edit here.) bmad-build-auto owns the spec lifecycle — its step-02-plan creates the spec at specPath from spec-template.md and manages status transitions. The setup agent only owns worktree + branch + sprint-status. SpecPath is computed and returned in SETUP_SCHEMA but the file is NOT touched at this stage. (bmad-build-auto will create it during the Build phase and overwrite any stub; a stub here would be wasted work + confuse the resume check in step-02-plan.)
+9. (NO spec edit here.) bmad-build-auto owns the spec lifecycle — its step-02-plan creates the spec at specPath from spec-template.md and manages status transitions. The setup agent only owns worktree + branch + sprint-status. SpecPath is computed and returned but the file is NOT touched at this stage. (bmad-build-auto will create it during the Build phase and overwrite any stub; a stub here would be wasted work + confuse the resume check in step-02-plan.)
 10. Return JSON with EXACTLY these fields (the orchestrator reads them by name —
     do NOT go read the script to discover them, this list IS the contract):
-      storyKey            (string)  — the story passed to you
-      repoRoot            (string)  — from step 1a
-      prdWorktreePath     (string)  — from step 1b
-      prdKey              (string)  — from step 1b
-      baseBranch          (string)  — from step 3
-      storyBranch         (string)  — from step 2a branch_patterns.story
-      worktreePath        (string)  — from step 6
-      baselineSha         (string)  — from step 5f
-      resumedFromBranch   (boolean) — from step 5c/5d/5e
-      sprintStatusUpdated (boolean) — true once step 7 committed the in-progress write
-      sprintStatusPath    (string)  — absolute path from step 4a
-      specPath            (string)  — computed in step 9 (file NOT written here)
-      prdBranch           (string)  — same value as baseBranch
-      mrRepo              (string)  — from step 2c
-      currentStatus       (string)  — the PRE-update development_status[storyKey] from step 7 (drives the dispatch gate)
-      issueStatusSynced   (boolean) — from step 8 (false on soft-fail)
+${describeSchema(SETUP_SCHEMA)}
     The other phases depend on these — incomplete context = broken workflow.
 
 CONSTRAINTS:
@@ -802,25 +794,19 @@ If Skill HALTs (terminal status != done), return { skillCompleted: false, error:
   }
 
   const postBuildResult = await agent(
-    `Post-build for story ${setup.storyKey}, iter ${iteration}. Build agent already invoked Skill: bmad-build-auto and committed locally. Your job: verify deliverables + push + return BUILD_SCHEMA.
+    `Post-build for story ${setup.storyKey}, iter ${iteration}. Build agent already invoked Skill: bmad-build-auto and committed locally. Your job: verify deliverables + push + return the fields listed at the end.
 
 OPERATE FROM: ${setup.worktreePath} (git checkout branch ${setup.storyBranch}).
 
 STEPS:
 1. Read spec frontmatter 'files' field at ${setup.specPath}.
-2. FILE-EXISTENCE CHECK (deliverable guard): for each path in 'files' field, run \`ls -1 <worktree>/<path> | head -1\`. If ANY missing → return BUILD_SCHEMA with error + pushed=false + followupReviewRecommended=true.
+2. FILE-EXISTENCE CHECK (deliverable guard): for each path in 'files' field, run \`ls -1 <worktree>/<path> | head -1\`. If ANY missing → return with error + pushed=false + followupReviewRecommended=true.
 3. PUSH: \`git push --force-with-lease origin ${setup.storyBranch}\`.
 4. Get final SHA: \`git rev-parse HEAD\`.
 5. Read spec frontmatter fields: followup_review_recommended, status.
 
-RETURN BUILD_SCHEMA:
-- storyKey: ${setup.storyKey}
-- iteration: ${iteration}
-- newSha: <final SHA>
-- followupReviewRecommended: <spec frontmatter followup_review_recommended>
-- specStatus: <spec frontmatter status>
-- pushed: true (after successful push)
-- patchesApplied, itemsDeferred, scoreFormula: parsed from spec's '## Auto Run Result' section
+RETURN JSON with EXACTLY these fields (storyKey and iteration are ${setup.storyKey} and ${iteration}):
+${describeSchema(BUILD_SCHEMA)}
 
 CONSTRAINTS:
 - DO NOT run Skill: bmad-build-auto (build agent did that)
@@ -988,25 +974,19 @@ If Skill HALTs (terminal status != done), return { skillCompleted: false, error:
   }
 
   const postBuildResult = await agent(
-    `Post-build for story ${setup.storyKey}, iter ${iteration}. Build agent already invoked Skill: bmad-build-auto and committed locally. Your job: verify deliverables + push + return BUILD_SCHEMA.
+    `Post-build for story ${setup.storyKey}, iter ${iteration}. Build agent already invoked Skill: bmad-build-auto and committed locally. Your job: verify deliverables + push + return the fields listed at the end.
 
 OPERATE FROM: ${setup.worktreePath} (git checkout branch ${setup.storyBranch}).
 
 STEPS:
 1. Read spec frontmatter 'files' field at ${setup.specPath}.
-2. FILE-EXISTENCE CHECK (deliverable guard): for each path in 'files' field, run \`ls -1 <worktree>/<path> | head -1\`. If ANY missing → return BUILD_SCHEMA with error + pushed=false + followupReviewRecommended=true.
+2. FILE-EXISTENCE CHECK (deliverable guard): for each path in 'files' field, run \`ls -1 <worktree>/<path> | head -1\`. If ANY missing → return with error + pushed=false + followupReviewRecommended=true.
 3. PUSH: \`git push --force-with-lease origin ${setup.storyBranch}\`.
 4. Get final SHA: \`git rev-parse HEAD\`.
 5. Read spec frontmatter fields: followup_review_recommended, status.
 
-RETURN BUILD_SCHEMA:
-- storyKey: ${setup.storyKey}
-- iteration: ${iteration}
-- newSha: <final SHA>
-- followupReviewRecommended: <spec frontmatter followup_review_recommended>
-- specStatus: <spec frontmatter status>
-- pushed: true (after successful push)
-- patchesApplied, itemsDeferred, scoreFormula: parsed from spec's '## Auto Run Result' section
+RETURN JSON with EXACTLY these fields (storyKey and iteration are ${setup.storyKey} and ${iteration}):
+${describeSchema(BUILD_SCHEMA)}
 
 CONSTRAINTS:
 - DO NOT run Skill: bmad-build-auto (build agent did that)
@@ -1114,7 +1094,8 @@ When invoked from bmad-prd-orchestrate, the orchestrator does NOT re-sync story
 issues in Phase 4 — it only advances the sprint-status YAML on the PRD branch and
 syncs EPIC issues (done + close) once every story of the epic is done.
 
-RETURN MERGE_SCHEMA (storyKey, mrIid, merged, sprintStatusDone, issueStatusSynced, error?).`,
+RETURN JSON with EXACTLY these fields (storyKey is ${setup.storyKey}, mrIid is ${mrResult.mrIid}):
+${describeSchema(MERGE_SCHEMA)}`,
     // Merge agent needs the Skill (merge-mr + story-issue done sync),
     // Read/Write/Edit for the sprint-status YAML in the PRD worktree, and Bash
     // for the git add/commit/push of that write.
@@ -1168,14 +1149,8 @@ STEPS:
    - Report keptWorktrees=[worktreePath], keptBranches=[storyBranch] in the return.
 1. ALWAYS (regardless of merge status):
    Remove orchestrator log files in ${setup.prdWorktreePath}/_bmad-output/implementation-artifacts/ matching pattern bmad-build-auto-result-*${setup.storyKey}* (only those for the just-completed story). These are always safe to remove because they're regenerated on retry.
-2. Return CLEANUP_SCHEMA with:
-   - removedWorktrees: [paths deleted, or empty]
-   - deletedBranches: [names deleted, or empty]
-   - keptWorktrees: [paths kept, or empty]
-   - keptBranches: [names kept, or empty]
-   - prunedRefs: count
-   - removedLogs: [file paths deleted]
-   - errors: [any error strings]
+2. Return JSON with EXACTLY these fields:
+${describeSchema(CLEANUP_SCHEMA)}
 
 DO NOT remove files outside _bmad-output/.
 DO NOT touch sprint-status.yaml or the spec file (those are tracked artifacts).

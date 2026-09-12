@@ -263,17 +263,22 @@ const timestamp = args_.timestamp || 'unknown';
 // runDir + convergeScriptPath are derived AFTER Setup (so the discovery step
 // can fail fast without leaving stale run-dir references in code).
 
+// Schema `description` fields are NOT decorative: describeSchema() renders them
+// into the agent prompt, so each prompt's field list is generated from the
+// schema instead of being written by hand. Edit the schema, and the prompt
+// follows. Guarded by test/pure.test.mjs.
+
 const SETUP_SCHEMA = {
   type: 'object',
   properties: {
-    repoRoot: { type: 'string' },
-    prdWorktreePath: { type: 'string' },
-    prdKey: { type: 'string' },
-    baseBranch: { type: 'string' },
-    prdBranch: { type: 'string' },
-    sprintStatusPath: { type: 'string' },
-    issueTrackingConfig: { type: 'object' },
-    convergeScriptPath: { type: 'string' },
+    repoRoot: { type: 'string', description: 'git rev-parse --show-toplevel' },
+    prdWorktreePath: { type: 'string', description: 'worktree whose branch matches feat/*/prd' },
+    prdKey: { type: 'string', description: 'the <prdKey> segment of that branch' },
+    baseBranch: { type: 'string', description: 'feat/<prdKey>/prd — passed to converge as its base' },
+    prdBranch: { type: 'string', description: 'same value as baseBranch; the branch sprint-status is pushed to' },
+    sprintStatusPath: { type: 'string', description: 'absolute path to sprint-status.yaml inside the PRD worktree' },
+    issueTrackingConfig: { type: 'object', description: 'parsed _bmad/custom/issue-tracking.yaml, passed through to converge' },
+    convergeScriptPath: { type: 'string', description: 'absolute path to bmad-build-converge.js, resolved as <skill_root_parent>/bmad-build-converge/scripts/bmad-build-converge.js' },
   },
   required: ['repoRoot', 'prdWorktreePath', 'prdKey', 'baseBranch', 'prdBranch', 'sprintStatusPath', 'issueTrackingConfig', 'convergeScriptPath'],
 };
@@ -281,23 +286,36 @@ const SETUP_SCHEMA = {
 const DEP_ENTRY_SCHEMA = {
   type: 'object',
   properties: {
-    story: { type: 'string' },
-    depends_on: { type: 'array', items: { type: 'string' } },
+    story: { type: 'string', description: 'the story key' },
+    depends_on: { type: 'array', items: { type: 'string' }, description: 'story keys this one must wait for' },
   },
   required: ['story', 'depends_on'],
 };
 
-const DEPS_SCHEMA = {
-  type: 'object',
-  properties: { inferred: { type: 'array', items: DEP_ENTRY_SCHEMA } },
-  required: ['inferred'],
-};
-
 const WRITE_STATE_SCHEMA = {
   type: 'object',
-  properties: { written: { type: 'boolean' }, path: { type: 'string' } },
+  properties: {
+    written: { type: 'boolean', description: 'true only when BOTH state.json and deps.json verified non-zero' },
+    path: { type: 'string', description: 'the state.json path that was written' },
+  },
   required: ['written', 'path'],
 };
+
+// describeSchema(schema) → the prompt-ready field list for a JSON schema.
+// Single source of truth for "what must this agent return": the prompt renders
+// this instead of hand-writing a field list, so a schema change cannot drift
+// away from its prompt. Duplicated in bmad-build-converge.js — Workflow-tool
+// scripts cannot import each other (same reason base64Encode is duplicated).
+function describeSchema(schema) {
+  const required = schema.required || [];
+  return Object.entries(schema.properties || {}).map(([name, prop]) => {
+    let type = prop.type || 'any';
+    if (type === 'array' && prop.items && prop.items.type) type = `array<${prop.items.type}>`;
+    const optional = required.includes(name) ? '' : ' [optional]';
+    const note = prop.description ? ` — ${prop.description}` : '';
+    return `  ${name} (${type})${optional}${note}`;
+  }).join('\n');
+}
 
 // ============================================================================
 // PHASE 1: SETUP — discover repo, PRD worktree, config, project_key
@@ -332,7 +350,9 @@ STEPS:
    c. Write <runDir>/state.json with the JSON object below. Replace the placeholder <discovered-prd-key> with the actual prdKey from step 2c:
       { "runId": "${timestamp}", "ts": "${timestamp}", "prdKey": "<discovered-prd-key>", "storyQueue": [], "completed": [], "blocked": [], "skipped": [], "awaitingOperator": [], "halts": [] }
    d. Append to <runDir>/journal.jsonl: {"ts":"${timestamp}","event":"setup_complete","prdKey":"<discovered-prd-key>"}
-8. Return SETUP_SCHEMA JSON with ALL fields filled.
+8. Return JSON with EXACTLY these fields (do NOT go read the script to discover
+   them — this list IS the contract; every phase below depends on it):
+${describeSchema(SETUP_SCHEMA)}
 
 CONSTRAINTS:
 - DO NOT modify prdWorktreePath or any other tracked file outside the run dir.
@@ -611,6 +631,9 @@ CRITICAL: After running, examine the VERIFY_STATE_BYTES and VERIFY_DEPS_BYTES ou
 - If either is 0 or missing → return {"written": false, "path": "${runDir}/state.json"} and the verify output.
 
 DO NOT default to written:false when verify output shows non-zero bytes — the previous version of this prompt routinely hallucinated written:false despite successful writes.
+
+Return JSON with EXACTLY these fields (path is always "${runDir}/state.json"):
+${describeSchema(WRITE_STATE_SCHEMA)}
 
 COMMAND:
 ${bashCmd}`,
