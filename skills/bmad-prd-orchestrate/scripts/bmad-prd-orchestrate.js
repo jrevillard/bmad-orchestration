@@ -1118,7 +1118,14 @@ log('Syncing sprint-status: completed stories → done (orchestrator is sole wri
 // `generate --set <key>=<status>` is the documented equivalent: re-parses the
 // epics, merges with existing statuses (preserving in-progress, etc.), and the
 // `--set` flag forces the targeted keys to the desired status.
-const sprintStatusSync = await agent(
+// Soft-fail around Phase 4 sync — if the sync throws (e.g. Skill global
+// unavailable, network error, prompt misread), the orchestrator MUST
+// continue with the rest of Phase 4. The sync is informational; the PRD
+// progress shouldn't depend on label-syncing succeeding.
+let sprintStatusSync;
+let sprintStatusSyncError = null;
+try {
+  sprintStatusSync = await agent(
   `You are the sprint-status sync agent for bmad-prd-orchestrate (Phase 4).
 
 PRD_WORKTREE_PATH: ${setup.prdWorktreePath}
@@ -1153,30 +1160,32 @@ STEPS:
    - git -C ${setup.prdWorktreePath} add _bmad-output/implementation-artifacts/sprint-status.yaml
    - git -C ${setup.prdWorktreePath} commit -m "chore(sprint-status): Phase 4 sync — <N> stories + <M> epics to done"
    - git -C ${setup.prdWorktreePath} push origin ${setup.prdBranch}
-7. If advanced == 0 (everything already done — rare idempotent rerun):
-   - Skip commit + push. Return committed=false, pushed=false.
-8. Return JSON: { advanced: <int>, advancedEpics: [<epicKey>], committed: <bool>, pushed: <bool>, projectName: <string> }
-
-CONSTRAINTS:
-- ONLY write to ${setup.prdWorktreePath}/_bmad-output/implementation-artifacts/sprint-status.yaml.
-- DO NOT modify any other tracked file.
-- DO NOT skip commit + push when advanced > 0 — without it the remote stays stale.
-- The orchestrator is the SOLE writer of the done transition; the converge setup
-  agent only writes 'in-progress' on the story branch.
-
-6.5. SYNC GITHUB ISSUE LABELS (mandatory — without this, issues stay stuck
-     at 'status:backlog' while sprint-status.yaml says 'done'). For each
-     story in COMPLETED_STORIES AND for each epic in advancedEpics, invoke
-     the Skill (one-shot per entity):
+7. SYNC GITHUB ISSUE LABELS (mandatory — without this, issues stay stuck at
+   status:backlog while sprint-status.yaml says done). Done BEFORE the
+   return spec in step 9 so labelsSynced is always populated. For each
+   story in COMPLETED_STORIES, AND SEPARATELY for each epic in advancedEpics,
+   invoke the Skill (one-shot per entity):
        BMAD_ISSUE_ACTION=set-status \\
        BMAD_ISSUE_KEY="<story-or-epic-key>" \\
        BMAD_ISSUE_PRD_KEY="${setup.prdKey}" \\
        BMAD_ISSUE_NEW_STATUS="done" \\
        BMAD_ISSUE_CLOSE=false \\
            Skill: bmad-issue-tracking-sync
-     Use allowedTools: ['Skill']. Capture { issue_id } from each. Soft-fail
-     any individual issue not found (don't block the rest). Return
-     labelsSynced: <count>.`,
+   Capture { issue_id } from each. Soft-fail any individual issue not found
+   (don't block the rest). labelsSynced = number of entities for which the
+   Skill returned a non-null issue_id (NOT-found do NOT count). If Skill
+   global is unavailable (ReferenceError) OR setup.prdKey is empty, skip
+   all invocations and set labelsSynced: 0 — do not throw.
+8. If advanced == 0 (everything already done — rare idempotent rerun):
+   - Skip commit + push. Return committed=false, pushed=false.
+9. Return JSON: { advanced: <int>, advancedEpics: [<epicKey>], committed: <bool>, pushed: <bool>, projectName: <string>, labelsSynced: <int> }
+
+CONSTRAINTS:
+- ONLY write to ${setup.prdWorktreePath}/_bmad-output/implementation-artifacts/sprint-status.yaml.
+- DO NOT modify any other tracked file.
+- DO NOT skip commit + push when advanced > 0 — without it the remote stays stale.
+- The orchestrator is the SOLE writer of the done transition; the converge setup
+  agent only writes 'in-progress' on the story branch.`,
   { label: `sprint-status-sync-${timestamp}`, phase: 'Epic boundary', schema: {
     type: 'object',
     properties: {
@@ -1188,8 +1197,16 @@ CONSTRAINTS:
       labelsSynced: { type: 'integer' },
     },
     required: ['advanced', 'advancedEpics', 'committed', 'pushed', 'labelsSynced'],
-  }, agentType: 'general-purpose' }
+  }, agentType: 'general-purpose', allowedTools: ['Skill', 'Bash'] }
 );
+} catch (e) {
+  sprintStatusSyncError = String(e);
+  log(`Phase 4 sprint-status sync failed: ${sprintStatusSyncError} — continuing with rest of Phase 4`)
+  sprintStatusSync = { advanced: 0, advancedEpics: [], committed: false, pushed: false, projectName: '', labelsSynced: 0 };
+}
+if (sprintStatusSyncError) {
+  await appendJournal({ event: 'phase4_sprint_status_sync_failed', error: sprintStatusSyncError });
+}
 
 log(`Sprint-status sync: ${sprintStatusSync.advanced} stories → done, ${sprintStatusSync.advancedEpics.length} epics → done (committed=${sprintStatusSync.committed}, pushed=${sprintStatusSync.pushed})`)
 await appendJournal({
@@ -1198,6 +1215,7 @@ await appendJournal({
   advancedEpics: sprintStatusSync.advancedEpics,
   committed: sprintStatusSync.committed,
   pushed: sprintStatusSync.pushed,
+  labelsSynced: sprintStatusSync.labelsSynced,
 });
 
 // 4.2 Optional retrospective at epic boundaries (--retro flag).

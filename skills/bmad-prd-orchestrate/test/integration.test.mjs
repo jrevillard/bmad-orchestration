@@ -112,3 +112,20 @@ test('integration: no other Workflow-tool global typos in either script', () => 
     }
   }
 });
+
+test('integration: Phase 4 sprint-status sync agent uses Skill: bmad-issue-tracking-sync', () => {
+  // Regression guard: Phase 4 must sync GitHub issue labels (not just
+  // sprint-status.yaml). Without this, completed stories stay at the
+  // status:backlog label even after the merge — drift between sprint-status
+  // (source of truth) and the issue tracker (what users see).
+  const src = readFileSync(ORCHESTRATOR_PATH, 'utf8');
+  // Pattern check: skill name + env-var pattern must be present in source.
+  assert.ok(src.includes('Skill: bmad-issue-tracking-sync'),
+    'No Skill: bmad-issue-tracking-sync invocation found — Phase 4 does not ' +
+    'sync issue labels. Without this, completed stories drift from the issue tracker.');
+  assert.ok(src.includes('BMAD_ISSUE_ACTION=set-status'),
+    'No BMAD_ISSUE_ACTION=set-status invocation found — Phase 4 agent missing ' +
+    'the env-var protocol for issue status updates.');
+  assert.ok(src.includes('labelsSynced'),
+    'No labelsSynced field found — Phase 4 schema missing label-sync counter.');
+});
