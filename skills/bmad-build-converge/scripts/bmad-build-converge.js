@@ -495,7 +495,25 @@ STEPS:
    merge agent later moves it to done + closes it. Without this step the story
    issue stays status:backlog for the entire build (the gap this step closes).
 9. (NO spec edit here.) bmad-build-auto owns the spec lifecycle — its step-02-plan creates the spec at specPath from spec-template.md and manages status transitions. The setup agent only owns worktree + branch + sprint-status. SpecPath is computed and returned in SETUP_SCHEMA but the file is NOT touched at this stage. (bmad-build-auto will create it during the Build phase and overwrite any stub; a stub here would be wasted work + confuse the resume check in step-02-plan.)
-10. Return SETUP_SCHEMA JSON with ALL fields filled (including currentStatus from step 7 and issueStatusSynced from step 8). The other phases depend on these — incomplete context = broken workflow.
+10. Return JSON with EXACTLY these fields (the orchestrator reads them by name —
+    do NOT go read the script to discover them, this list IS the contract):
+      storyKey            (string)  — the story passed to you
+      repoRoot            (string)  — from step 1a
+      prdWorktreePath     (string)  — from step 1b
+      prdKey              (string)  — from step 1b
+      baseBranch          (string)  — from step 3
+      storyBranch         (string)  — from step 2a branch_patterns.story
+      worktreePath        (string)  — from step 6
+      baselineSha         (string)  — from step 5f
+      resumedFromBranch   (boolean) — from step 5c/5d/5e
+      sprintStatusUpdated (boolean) — true once step 7 committed the in-progress write
+      sprintStatusPath    (string)  — absolute path from step 4a
+      specPath            (string)  — computed in step 9 (file NOT written here)
+      prdBranch           (string)  — same value as baseBranch
+      mrRepo              (string)  — from step 2c
+      currentStatus       (string)  — the PRE-update development_status[storyKey] from step 7 (drives the dispatch gate)
+      issueStatusSynced   (boolean) — from step 8 (false on soft-fail)
+    The other phases depend on these — incomplete context = broken workflow.
 
 CONSTRAINTS:
 - DO NOT modify prdWorktreePath (the PRD worktree). Only create the story worktree.
@@ -504,7 +522,11 @@ CONSTRAINTS:
 - Step 8 (tracker sync) is SOFT-FAIL — NEVER halt setup because the issue was
   missing or the Skill errored. Only discovery failures HALT.
 - If discovery fails at any step, HALT with the failing field empty + clear error in storyKey.`,
-  { label: `setup-${storyKey}`, phase: 'Setup', schema: SETUP_SCHEMA, agentType: 'general-purpose' }
+  { label: `setup-${storyKey}`, phase: 'Setup', schema: SETUP_SCHEMA, agentType: 'general-purpose',
+    // Setup only reads (issue-tracking.yaml, sprint-status.yaml), runs git
+    // (worktree/branch/sprint-status commit+push) and invokes the Skill for the
+    // step-8 tracker sync. No Write/Edit: setup must never edit the spec.
+    allowedTools: ['Read', 'Bash', 'Skill'] }
 )
 
 if (!setup || !setup.worktreePath) {
