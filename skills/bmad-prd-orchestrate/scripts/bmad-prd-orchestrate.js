@@ -901,7 +901,10 @@ CLOSE=false maps to REOPEN in update-issue-status — intentional here (the epic
 issue must be open while its stories are being built).
 
 Capture { issue_id } from stdout. If the Skill reports the issue was not found, set issue_id=null and return normally (do not halt). Soft-fail by design — a missing epic issue must not block the build.`,
-        { label: `epic-status-${currentEpic}`, phase: 'Execute', schema: { type: 'object', properties: { issue_id: { type: 'string' } } }, agentType: 'general-purpose' }
+        // One shot, no other actions (see the prompt). No Bash here, so unlike
+        // the git-backed agents this restriction actually holds: the agent
+        // cannot touch the repo or spawn anything.
+        { label: `epic-status-${currentEpic}`, phase: 'Execute', schema: { type: 'object', properties: { issue_id: { type: 'string' } } }, agentType: 'general-purpose', allowedTools: ['Skill'] }
       );
     } catch (e) {
       epicStatusError = String(e);

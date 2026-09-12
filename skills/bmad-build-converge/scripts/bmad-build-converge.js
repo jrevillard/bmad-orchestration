@@ -523,9 +523,16 @@ CONSTRAINTS:
   missing or the Skill errored. Only discovery failures HALT.
 - If discovery fails at any step, HALT with the failing field empty + clear error in storyKey.`,
   { label: `setup-${storyKey}`, phase: 'Setup', schema: SETUP_SCHEMA, agentType: 'general-purpose',
-    // Setup only reads (issue-tracking.yaml, sprint-status.yaml), runs git
+    // Setup reads (issue-tracking.yaml, sprint-status.yaml), runs git
     // (worktree/branch/sprint-status commit+push) and invokes the Skill for the
-    // step-8 tracker sync. No Write/Edit: setup must never edit the spec.
+    // step-8 tracker sync.
+    //
+    // CAVEAT: this is nominal hardening, not a sandbox. Setup needs Bash for git,
+    // and Bash alone can write or edit any file (`cat >`, `sed -i`, `python -c`)
+    // or spawn another agent (`claude -p`). What this buys: Write/Edit/Agent are
+    // not in the agent's tool list, so the model does not reach for them — it
+    // makes the spec-untouched intent explicit rather than enforcing it. Real
+    // enforcement would require dropping Bash, which setup cannot do.
     allowedTools: ['Read', 'Bash', 'Skill'] }
 )
 
@@ -712,7 +719,10 @@ Invoke the Skill once (no other actions):
 
 Capture { issue_id }. Soft-fail by design — if the issue is not found or the
 Skill errors, log and continue. Return JSON { issue_id: "<id or empty string>" }.`,
-        { label: `issue-done-${setup.storyKey}`, phase: 'Auto-merge', schema: { type: 'object', properties: { issue_id: { type: 'string' } } }, agentType: 'general-purpose' }
+        // Skill-only by design: this agent exists solely to move the story issue
+        // to done + closed. No Bash, so the restriction holds — it cannot touch
+        // the repo or spawn anything.
+        { label: `issue-done-${setup.storyKey}`, phase: 'Auto-merge', schema: { type: 'object', properties: { issue_id: { type: 'string' } } }, agentType: 'general-purpose', allowedTools: ['Skill'] }
       );
       alreadyMergedIssueSynced = !!(doneSync && doneSync.issue_id);
     } catch (e) {
@@ -1105,7 +1115,17 @@ issues in Phase 4 — it only advances the sprint-status YAML on the PRD branch 
 syncs EPIC issues (done + close) once every story of the epic is done.
 
 RETURN MERGE_SCHEMA (storyKey, mrIid, merged, sprintStatusDone, issueStatusSynced, error?).`,
-    { label: `merge-${setup.storyKey}`, phase: 'Auto-merge', schema: MERGE_SCHEMA, agentType: 'general-purpose' }
+    // Merge agent needs the Skill (merge-mr + story-issue done sync),
+    // Read/Write/Edit for the sprint-status YAML in the PRD worktree, and Bash
+    // for the git add/commit/push of that write.
+    //
+    // CAVEAT: nominal only — Bash is required here, and Bash subsumes
+    // Read/Write/Edit (and can spawn subagents via `claude -p`). Only Agent,
+    // Glob and Grep are genuinely withdrawn, and even those are reachable
+    // through Bash. Kept because it documents the intended surface and keeps
+    // subagent-spawning out of an agent that has no reason to fan out.
+    { label: `merge-${setup.storyKey}`, phase: 'Auto-merge', schema: MERGE_SCHEMA, agentType: 'general-purpose',
+      allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Skill'] }
   )
 } else {
   const reason = !lastSpecStatus || !SPEC_STATUSES_BLOCKING_MERGE.has(lastSpecStatus)
