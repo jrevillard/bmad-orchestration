@@ -43,19 +43,24 @@ sequenceDiagram
         Orch->>Orch: read sprint-status (status + deps)
         Orch->>Build: Workflow({ scriptPath: bmad-build-converge.js, args: { storyKey, ... } })
         Note over Build: Phase 1: setup agent
+        Build->>Skill: bmad-issue-tracking-sync<br/>set-status story key<br/>BMAD_ISSUE_NEW_STATUS="in-progress"<br/>(soft-fail)
+        Skill->>GH: Update label status:in-progress
         Build->>Build: merge-check (git merge-base --is-ancestor)
         alt Branch already merged (1-1, 1-2 case)
+            Build->>Skill: set-status story key done + CLOSE=true (already-merged path)
+            Skill->>GH: status:done (old status:* dropped), issue closed
             Build-->>Orch: { converged: true, merge: { merged: true, alreadyMerged: true }, ... }
             Note over Orch: isConverged(convergeResult) → true (merge.merged OR converged)
             Orch->>Orch: state.completed.push(sk)
             Orch->>Orch: state = removeFromState(state, sk) [cleanup stale blocked/halts]
             Orch->>Orch: appendJournal 'converged' (via: 'merge')
         else Branch not yet merged (normal path)
-            Build->>Build: Phase 1: setup agent
             Build->>Build: Phase 2: mr-create (finds existing commits ahead, creates MR)
             Build->>Build: Phase A: convergence loop (build + ci)
             Build->>Build: Phase B: ci gate
             Build->>Build: Phase C: merge
+            Build->>Skill: set-status story key done + CLOSE=true
+            Skill->>GH: status:done (old status:* dropped), issue closed
             Build->>Build: Phase D: cleanup
             Build-->>Orch: { converged: true, merge: { merged: true, ... }, ... }
             Orch->>Orch: state.completed.push(sk)
@@ -69,16 +74,20 @@ sequenceDiagram
     Orch->>Orch: bash: sprint_plan.py generate --set <key>=done (advances YAML)
     alt YAML advanced > 0
         Orch->>Orch: git add + commit + push origin
-        Note over Orch: For each completed story AND each done epic:
-        Orch->>Build: Skill: bmad-issue-tracking-sync<br/>BMAD_ISSUE_ACTION=set-status<br/>BMAD_ISSUE_KEY="<key>"<br/>BMAD_ISSUE_NEW_STATUS="done"<br/>BMAD_ISSUE_CLOSE=false
-        Build->>GH: Update label (status:done, remove status:backlog)
-        Build-->>Orch: { issue_id }
+        Note over Orch: For each done epic (key "epic-N"), then the story safety net:
+        Orch->>Skill: bmad-issue-tracking-sync<br/>BMAD_ISSUE_ACTION=set-status<br/>BMAD_ISSUE_KEY="epic-N"<br/>BMAD_ISSUE_NEW_STATUS="done"<br/>BMAD_ISSUE_CLOSE=true
+        Skill->>GH: status:done (old status dropped), epic issue closed
+        Skill-->>Orch: { issue_id }
+        opt STORIES_NEEDING_SYNC (normally empty)
+            Orch->>Skill: set-status story key done + CLOSE=true
+            Skill->>GH: status:done, story issue closed
+        end
         Orch->>Orch: labelsSynced++ (count)
     end
     Orch->>Orch: appendJournal 'phase4_sprint_status_sync' (includes labelsSynced)
 
     alt --retro=true AND epic advanced
-        Orch->>Build: Skill: bmad-retrospective
+        Orch->>Orch: Skill: bmad-retrospective -H <epicNum> (retro agent)
     end
 
     Orch-->>Skill: return { ... }
@@ -93,9 +102,16 @@ sequenceDiagram
 3. **build-converge merge-check uses `git merge-base --is-ancestor`**, then
    case-insensitive check on stdout (`MERGED` / `merged`).
 4. **Each story's spec file lives in `_bmad-output/implementation-artifacts/stories/<key>.md`**.
-5. **Phase 4 labels sync is implemented but soft-fails per-entity** — the PRD
-   never halts on label-sync. Without it, completed stories stay labeled
-   `status:backlog` while YAML says `done` (the bug we fixed).
+5. **Story issue lifecycle is owned by `bmad-build-converge`.** The setup agent
+   sets `in-progress`; the merge agent (and the already-merged short-circuit)
+   sets `done` + closes the issue. Standalone convergence therefore leaves the
+   tracker consistent without any orchestrator. Both syncs are soft-fail — a
+   missing issue never blocks setup or merge.
+6. **Epic issue lifecycle is owned by the orchestrator** — only it observes epic
+   boundaries (`extractEpicKey` vs `lastEpic`). It sets `in-progress` at the
+   boundary and `done` + close in Phase 4, once every story of the epic is done.
+   Phase 4 never re-syncs story issues (converge is the sole story-done writer).
+   Label sync is soft-fail per entity — the PRD never halts on it.
 
 ### bmad-loop comparison
 
@@ -213,8 +229,8 @@ flowchart TD
     C --> D{YAML modified?}
     D -- no --> Z2[Skip commit+push]
     D -- yes --> E[git add + commit + push origin]
-    E --> F[For each completed story AND each advanced epic]
-    F --> G[Invoke Skill: bmad-issue-tracking-sync<br/>BMAD_ISSUE_ACTION=set-status<br/>BMAD_ISSUE_KEY=&lt;key&gt;<br/>BMAD_ISSUE_NEW_STATUS=done]
+    E --> F[For each advanced epic, key epic-N<br/>then STORIES_NEEDING_SYNC<br/>normally empty]
+    F --> G[Invoke Skill: bmad-issue-tracking-sync<br/>BMAD_ISSUE_ACTION=set-status<br/>BMAD_ISSUE_KEY=epic-N<br/>BMAD_ISSUE_NEW_STATUS=done<br/>BMAD_ISSUE_CLOSE=true]
     G --> H{issue found?}
     H -- yes --> I[gh/glab update label status:done]
     H -- no --> J[Log warn, continue]
@@ -231,7 +247,12 @@ flowchart TD
 ### Key invariants
 
 - **Both** the YAML file AND the issue labels must advance. YAML without
-  label-sync = drift between source-of-truth and UI.
+  label-sync = drift between source-of-truth and UI. For epics this happens here;
+  for stories it already happened at converge merge.
+- **Epics here, stories only as a safety net** — `labelsSynced` counts advanced
+  **epics** plus the `STORIES_NEEDING_SYNC` entries (stories whose converge-side
+  sync soft-failed, or already `done` before the run). That list is empty on the
+  happy path: story issues are synced by `bmad-build-converge` at merge.
 - **Soft-fail per entity** — one missing issue doesn't block the rest.
   `labelsSynced` counts only entities where the Skill returned a non-null
   `issue_id`.
@@ -240,3 +261,68 @@ flowchart TD
 - **try/catch around the sync call** — if the Skill global is unavailable
   (ReferenceError) or the call fails, the orchestrator catches and continues
   with safe defaults (`labelsSynced: 0`). The PRD never halts on label-sync.
+
+## 5. Issue lifecycle — tracker labels per entity
+
+Vocabulary is owned by the upstream `bmad-issue-tracking` module
+(`common/ensure-labels.yaml`):
+
+- **Type labels**: `type:prd`, `type:epic`, `type:story`, `type:retrospective`
+- **Status labels**: `backlog`, `ready-for-dev`, `in-progress`, `review`,
+  `awaiting-operator`, `done` — rendered as `status:<x>` on GitHub and
+  `status::<x>` on GitLab (the separator is platform-specific; see
+  `ensure-labels.yaml` `{sep}` and `update-issue-status.yaml`).
+
+There is **no `status:close`**. "Closed" is the **issue state**, set by
+`close=true` on the atomic. `common/update-issue-status.yaml` drops every
+existing `status:*` label before adding the new one, so statuses never stack.
+
+### Generic status machine
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> backlog : create-issue
+    backlog --> ready-for-dev : spec committed
+    ready-for-dev --> in-progress : work starts
+    in-progress --> review : dev finished
+    review --> in-progress : review verdict != done
+    in-progress --> awaiting-operator : human action required
+    awaiting-operator --> in-progress : operator unblocks
+    in-progress --> done : merged / finished
+    review --> done : review verdict = done
+    done --> [*] : issue closed (close=true)
+```
+
+### Who owns each transition
+
+| Entity | → `in-progress` | → `review` | → `done` + close |
+|---|---|---|---|
+| **PRD** (`type:prd`) | upstream `bmad-issue-tracking` | upstream | upstream |
+| **Epic** (`type:epic`) | **orchestrator** at epic boundary (`epic-status-${currentEpic}`, key `epic-N`) | — | **orchestrator Phase 4**, once every story of the epic is `done` |
+| **Story** (`type:story`) | **converge setup** (step 8) | upstream dev-finish — *not used by the JS orchestration* | **converge merge** (also the already-merged short-circuit), `CLOSE=true` |
+| **Retro** (`type:retrospective`) | upstream `bmad-retrospective` | — | upstream `bmad-retrospective` |
+
+### Key invariants
+
+- **One writer per transition.** A component only writes a transition it can
+  observe: converge observes a single story (setup → in-progress, merge → done),
+  the orchestrator observes epic boundaries and cross-story aggregation (epic
+  in-progress, epic done). PRD/retro belong to the upstream module.
+- **Standalone correctness is the tiebreaker.** Converge owns the story done
+  label precisely so a standalone (non-orchestrator) run leaves the tracker
+  consistent — the orchestrator is not present to do it.
+- **Every tracker sync is soft-fail.** A missing issue or Skill error logs a
+  warning and continues; it never blocks setup, merge, or Phase 4.
+- **The orchestrator is the sole writer of the `sprint-status.yaml` done
+  transition on the PRD branch**, but it never writes the story issue done
+  label on the happy path. YAML ownership and label ownership are deliberately
+  split.
+- **Epic issues are addressed by their canonical sprint key `epic-<N>`, never by
+  the bare number.** `find-issue` does a substring search scoped only by the PRD
+  label and takes the first hit, so `search_text="2"` matches story issues and
+  would close the wrong issue. The epic issue body carries `Sprint Key: epic-N`.
+- **Phase 4 carries a story safety net (`STORIES_NEEDING_SYNC`)** covering
+  stories whose converge-side sync soft-failed and stories already `done` before
+  the run (never dispatched). The list is empty on the happy path, so converge
+  remains the primary — and normally the only — writer of the story done label.

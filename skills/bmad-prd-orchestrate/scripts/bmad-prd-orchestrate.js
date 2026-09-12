@@ -857,6 +857,12 @@ await writeState(state);
 
 // Per-story loop
 let lastEpic = null;
+// Stories whose issue label bmad-build-converge confirmed as synced (done +
+// closed) during THIS process. Anything completed but absent here gets a
+// second, idempotent sync attempt from Phase 4 — converge is the primary
+// writer, this is only the safety net for a soft-fail (Skill unavailable) or
+// for stories already 'done' before this run ever dispatched them.
+const syncedThisRun = [];
 while (state.storyQueue.length > 0) {
   const sk = state.storyQueue[0];
   state.iterationCount++;
@@ -880,11 +886,19 @@ while (state.storyQueue.length > 0) {
 
 Invoke the Skill with these env vars (one shot, no other actions):
    BMAD_ISSUE_ACTION=set-status \\
-   BMAD_ISSUE_KEY="${currentEpic}" \\
+   BMAD_ISSUE_KEY="epic-${currentEpic}" \\
    BMAD_ISSUE_PRD_KEY="${setup.prdKey}" \\
    BMAD_ISSUE_NEW_STATUS="in-progress" \\
    BMAD_ISSUE_CLOSE=false \\
        Skill: bmad-issue-tracking-sync
+
+BMAD_ISSUE_KEY must be the canonical epic sprint key "epic-<N>" — never the bare
+number. find-issue does a substring search scoped only by the PRD label, so a
+bare "1" matches every story issue of the epic and the first hit would be
+updated instead of the epic issue. The epic issue body carries the sprint key
+"Sprint Key: epic-<N>", which makes "epic-<N>" an unambiguous search text.
+CLOSE=false maps to REOPEN in update-issue-status — intentional here (the epic
+issue must be open while its stories are being built).
 
 Capture { issue_id } from stdout. If the Skill reports the issue was not found, set issue_id=null and return normally (do not halt). Soft-fail by design — a missing epic issue must not block the build.`,
         { label: `epic-status-${currentEpic}`, phase: 'Execute', schema: { type: 'object', properties: { issue_id: { type: 'string' } } }, agentType: 'general-purpose' }
@@ -1071,7 +1085,14 @@ ${bashReadCmd}`,
     state = removeFromState(state, sk);
     const convergedVia = convergeResult.converged === true ? 'converged' : 'merge';
     log(`Story ${sk} converged via ${convergedVia} (iter ${convergeResult.iterations || 0}, finalSha=${(convergeResult.finalSha || '').substring(0, 7)})`)
-    await appendJournal({ event: 'converged', storyKey: sk, iteration: state.iterationCount, via: convergedVia });
+    // Track whether converge confirmed the story issue sync (done + closed).
+    // When it did not (soft-fail, issue not found yet), Phase 4 retries it.
+    const storyIssueSynced = !!(convergeResult.merge && convergeResult.merge.issueStatusSynced === true);
+    if (storyIssueSynced) syncedThisRun.push(sk);
+    await appendJournal({ event: 'converged', storyKey: sk, iteration: state.iterationCount, via: convergedVia, storyIssueSynced });
+    if (!storyIssueSynced) {
+      log(`Story ${sk} issue NOT synced by converge (soft-fail) — Phase 4 will retry the done+close sync`)
+    }
   } else {
     state.blocked.push({ story: sk, reason: convergeResult.escalateReason || 'not_converged' });
     log(`Story ${sk} blocked: ${convergeResult.escalateReason || 'not_converged'}`)
@@ -1103,13 +1124,21 @@ await appendJournal({ event: 'execute_complete', completed: state.completed.leng
 // PHASE 4: EPIC BOUNDARY — sprint-status sync + optional retrospective
 // ============================================================================
 phase('Epic boundary')
-log('Syncing sprint-status: completed stories → done (orchestrator is sole writer of done transitions)...')
+log('Syncing sprint-status: completed stories → done (orchestrator is sole writer of the PRD-branch YAML done transition; story issue labels are owned by converge merge)...')
 
 // 4.1 Sprint-status sync (ALWAYS — the orchestrator is the sole writer of the
-// done transition). After each story MR merges into the PRD branch,
-// sprint-status.yaml holds `in-progress` (committed by the converge setup
-// agent onto the story branch, propagated via MR merge). The orchestrator
-// advances to `done` here so the file's terminal state is correct.
+// sprint-status YAML done transition on the PRD branch). After each story MR
+// merges into the PRD branch, sprint-status.yaml holds `in-progress` (committed
+// by the converge setup agent onto the story branch, propagated via MR merge).
+// The orchestrator advances the YAML to `done` here so the file's terminal
+// state is correct.
+//
+// TRACKER ownership (distinct from the YAML): the converge merge agent owns the
+// story issue lifecycle (in-progress at setup, done + closed at merge). This
+// Phase 4 sync touches EPIC issues — marking an epic done + closed once every
+// one of its stories is done — plus a SAFETY NET over STORIES_NEEDING_SYNC
+// (stories whose converge-side sync soft-failed, or that were already 'done'
+// before this run). That list is empty on the happy path.
 //
 // Implementation note: sprint_plan.py has no `advance` subcommand. The brief
 // references an `advance` subcommand, but the script's actual subcommands are
@@ -1123,6 +1152,17 @@ log('Syncing sprint-status: completed stories → done (orchestrator is sole wri
 // progress shouldn't depend on label-syncing succeeding.
 let sprintStatusSync;
 let sprintStatusSyncError = null;
+// Safety net for story issue labels (see syncedThisRun). Covers:
+//   - stories this run converged but whose converge-side sync soft-failed
+//     (Skill unavailable, issue not found yet) — otherwise the label would stay
+//     at status:in-progress forever while sprint-status.yaml says done;
+//   - stories already 'done' before this run, so converge never dispatched them.
+// Converge stays the primary writer — this list is empty on the happy path, so
+// Phase 4 usually issues zero story syncs. It is intentionally NOT persisted:
+// after a resume it re-covers every already-done story, which costs a few
+// redundant idempotent Skill calls (done+close on an already-done issue) but
+// can never leave a label out of sync.
+const storiesNeedingSync = state.completed.filter(sk => !syncedThisRun.includes(sk));
 try {
   sprintStatusSync = await agent(
   `You are the sprint-status sync agent for bmad-prd-orchestrate (Phase 4).
@@ -1130,6 +1170,7 @@ try {
 PRD_WORKTREE_PATH: ${setup.prdWorktreePath}
 SPRINT_STATUS_PATH: ${setup.sprintStatusPath}
 COMPLETED_STORIES: ${JSON.stringify(state.completed)}
+STORIES_NEEDING_SYNC: ${JSON.stringify(storiesNeedingSync)}
 TIMESTAMP: ${timestamp}
 
 GOAL: Advance sprint-status.yaml on the PRD branch so every converged story
@@ -1159,32 +1200,68 @@ STEPS:
    - git -C ${setup.prdWorktreePath} add _bmad-output/implementation-artifacts/sprint-status.yaml
    - git -C ${setup.prdWorktreePath} commit -m "chore(sprint-status): Phase 4 sync — <N> stories + <M> epics to done"
    - git -C ${setup.prdWorktreePath} push origin ${setup.prdBranch}
-7. SYNC GITHUB ISSUE LABELS (mandatory — without this, issues stay stuck at
-   status:backlog while sprint-status.yaml says done). Done BEFORE the
-   return spec in step 9 so labelsSynced is always populated. For each
-   story in COMPLETED_STORIES, AND SEPARATELY for each epic in advancedEpics,
-   invoke the Skill (one-shot per entity):
+7. SYNC EPIC ISSUE LABELS (mandatory when advancedEpics is non-empty — without
+   this, a finished epic stays at status:backlog while its stories are done).
+   The orchestrator owns ONLY epic issues: story issues are synced by
+   bmad-build-converge (in-progress at setup, done + closed at merge), so do
+   NOT touch story issues here. Done BEFORE the return spec in step 9 so
+   labelsSynced is always populated. For each epic in advancedEpics, invoke the
+   Skill (one shot):
        BMAD_ISSUE_ACTION=set-status \\
-       BMAD_ISSUE_KEY="<story-or-epic-key>" \\
+       BMAD_ISSUE_KEY="<epic-N>" \\
        BMAD_ISSUE_PRD_KEY="${setup.prdKey}" \\
        BMAD_ISSUE_NEW_STATUS="done" \\
-       BMAD_ISSUE_CLOSE=false \\
+       BMAD_ISSUE_CLOSE=true \\
            Skill: bmad-issue-tracking-sync
-   Capture { issue_id } from each. Soft-fail any individual issue not found
-   (don't block the rest). labelsSynced = number of entities for which the
-   Skill returned a non-null issue_id (NOT-found do NOT count). If Skill
-   global is unavailable (ReferenceError) OR setup.prdKey is empty, skip
-   all invocations and set labelsSynced: 0 — do not throw.
+   BMAD_ISSUE_KEY must be the canonical epic sprint key "epic-<N>" (e.g. "epic-2"),
+   NEVER the bare number — find-issue does a substring search scoped only by the
+   PRD label, so "2" would match story issues and the first hit would be closed
+   by mistake. The epic issue body carries the sprint key "Sprint Key: epic-<N>".
+   advancedEpics already contains only epics whose EVERY story is 'done' (step 4).
+   CLOSE=true closes the epic issue; the Skill's update-issue-status atomic drops
+   any existing status label first (platform separator: status:: on GitLab,
+   status: on GitHub). Capture { issue_id }. Soft-fail any individual issue not
+   found (don't block the rest). labelsSynced = number of epics for which the
+   Skill returned a non-null issue_id (NOT-found do NOT count). If Skill global is
+   unavailable (ReferenceError) OR setup.prdKey is empty, skip all invocations and
+   set labelsSynced: 0 — do not throw.
+
+   THEN the STORY safety net — ALWAYS, before deciding to skip anything, even when
+   advancedEpics is empty: for each story key in STORIES_NEEDING_SYNC, invoke the
+   same Skill with the STORY key:
+       BMAD_ISSUE_ACTION=set-status \\
+       BMAD_ISSUE_KEY="<story-key>" \\
+       BMAD_ISSUE_PRD_KEY="${setup.prdKey}" \\
+       BMAD_ISSUE_NEW_STATUS="done" \\
+       BMAD_ISSUE_CLOSE=true \\
+           Skill: bmad-issue-tracking-sync
+   STORIES_NEEDING_SYNC contains stories whose converge-side sync soft-failed, plus
+   stories already 'done' before this run (so converge never dispatched them). It is
+   normally EMPTY — converge owns the story done label and already synced the happy
+   path — so this loop usually does nothing. Same soft-fail rule per story.
+   labelsSynced = epics synced + these stories combined.
 8. If advanced == 0 (everything already done — rare idempotent rerun):
-   - Skip commit + push. Return committed=false, pushed=false.
-9. Return JSON: { advanced: <int>, advancedEpics: [<epicKey>], committed: <bool>, pushed: <bool>, projectName: <string>, labelsSynced: <int> }
+   - Skip the sprint-status commit + push. Return committed=false, pushed=false.
+   - STILL return every required field: advancedEpics (use [] when nothing
+     advanced) and the real labelsSynced count from step 7 — an early return that
+     omits them violates the return schema.
+9. Return JSON: { advanced: <int>, advancedEpics: [<epic-N>], committed: <bool>, pushed: <bool>, projectName: <string>, labelsSynced: <int> }
+   Every advancedEpics entry MUST be the canonical sprint key "epic-N" (e.g.
+   "epic-2") — NEVER the bare number N. Downstream consumers depend on it: the
+   retro agent parses /^epic-(\d+)$/ and WARN-skips anything else, and step 7
+   passes the key straight to BMAD_ISSUE_KEY (where a bare number would
+   substring-match story issues and close the wrong one).
 
 CONSTRAINTS:
 - ONLY write to ${setup.prdWorktreePath}/_bmad-output/implementation-artifacts/sprint-status.yaml.
 - DO NOT modify any other tracked file.
 - DO NOT skip commit + push when advanced > 0 — without it the remote stays stale.
-- The orchestrator is the SOLE writer of the done transition; the converge setup
-  agent only writes 'in-progress' on the story branch.`,
+- You are the SOLE writer of the sprint-status YAML done transition on the PRD
+  branch. Story ISSUE labels are owned by bmad-build-converge (in-progress at
+  setup, done + closed at merge) — do NOT re-sync the stories it already synced.
+  You sync EPIC issues (done + closed) when all of the epic's stories are done,
+  PLUS the STORIES_NEEDING_SYNC safety net (stories converge could not sync, or
+  that were already done before this run).`,
   { label: `sprint-status-sync-${timestamp}`, phase: 'Epic boundary', schema: {
     type: 'object',
     properties: {

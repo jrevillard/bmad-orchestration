@@ -66,10 +66,16 @@ const SETUP_SCHEMA = {
     // SETUP agent so downstream phases (mr-create) don't have to re-parse the
     // config or re-read it from disk. Used as BMAD_MR_REPO for Skill: bmad-issue-tracking-sync.
     mrRepo: { type: 'string' },
+    // issueStatusSynced: true when the setup agent transitioned the story's
+    // tracker issue to 'in-progress' via Skill: bmad-issue-tracking-sync.
+    // Soft-fail by design — false when the issue was missing or the Skill
+    // errored. Informational only; never blocks setup.
+    issueStatusSynced: { type: 'boolean' },
   },
   required: ['storyKey', 'repoRoot', 'prdWorktreePath', 'prdKey', 'baseBranch', 'storyBranch',
              'worktreePath', 'baselineSha', 'resumedFromBranch', 'sprintStatusUpdated',
-             'sprintStatusPath', 'specPath', 'prdBranch', 'mrRepo', 'currentStatus'],
+             'sprintStatusPath', 'specPath', 'prdBranch', 'mrRepo', 'currentStatus',
+             'issueStatusSynced'],
 };
 
 const BUILD_SCHEMA = {
@@ -96,9 +102,13 @@ const MERGE_SCHEMA = {
     mrIid: { type: 'integer' },
     merged: { type: 'boolean' },
     sprintStatusDone: { type: 'boolean' },
+    // issueStatusSynced: true when the merge agent moved the story's tracker
+    // issue to status:done and closed it. Converge is the SOLE writer of the
+    // story done transition (see merge prompt). Soft-fail — never blocks merge.
+    issueStatusSynced: { type: 'boolean' },
     error: { type: 'string' },
   },
-  required: ['storyKey', 'mrIid', 'merged', 'sprintStatusDone'],
+  required: ['storyKey', 'mrIid', 'merged', 'sprintStatusDone', 'issueStatusSynced'],
 };
 
 const CLEANUP_SCHEMA = {
@@ -470,13 +480,29 @@ STEPS:
    - Update last_updated to "${timestamp}"
    - git add + commit -m "chore(sprint-status): story <storyKey> → in-progress"
    - DO push this commit (so MR create phase has something to point at): \`git push origin \${storyBranch}\` (use --force-with-lease if local is ahead).
-8. (NO spec edit here.) bmad-build-auto owns the spec lifecycle — its step-02-plan creates the spec at specPath from spec-template.md and manages status transitions. The setup agent only owns worktree + branch + sprint-status. SpecPath is computed and returned in SETUP_SCHEMA but the file is NOT touched at this stage. (bmad-build-auto will create it during the Build phase and overwrite any stub; a stub here would be wasted work + confuse the resume check in step-02-plan.)
-9. Return SETUP_SCHEMA JSON with ALL fields filled (including currentStatus from step 7). The other phases depend on these — incomplete context = broken workflow.
+8. SYNC STORY ISSUE → in-progress on the issue tracker (soft-fail — a missing or
+   unreadable issue must NOT block setup). One Skill invocation:
+       BMAD_ISSUE_ACTION=set-status \\
+       BMAD_ISSUE_KEY="${storyKey}" \\
+       BMAD_ISSUE_PRD_KEY="<prdKey discovered in step 2>" \\
+       BMAD_ISSUE_NEW_STATUS="in-progress" \\
+       BMAD_ISSUE_CLOSE=false \\
+           Skill: bmad-issue-tracking-sync
+   Capture { issue_id } from stdout. If non-null → issueStatusSynced=true. If the
+   Skill reports the issue not found, errors, or is unavailable → log a WARNING
+   and set issueStatusSynced=false. Do NOT halt setup on this step.
+   NOTE: this is the ONLY place a story issue moves to in-progress. The converge
+   merge agent later moves it to done + closes it. Without this step the story
+   issue stays status:backlog for the entire build (the gap this step closes).
+9. (NO spec edit here.) bmad-build-auto owns the spec lifecycle — its step-02-plan creates the spec at specPath from spec-template.md and manages status transitions. The setup agent only owns worktree + branch + sprint-status. SpecPath is computed and returned in SETUP_SCHEMA but the file is NOT touched at this stage. (bmad-build-auto will create it during the Build phase and overwrite any stub; a stub here would be wasted work + confuse the resume check in step-02-plan.)
+10. Return SETUP_SCHEMA JSON with ALL fields filled (including currentStatus from step 7 and issueStatusSynced from step 8). The other phases depend on these — incomplete context = broken workflow.
 
 CONSTRAINTS:
 - DO NOT modify prdWorktreePath (the PRD worktree). Only create the story worktree.
 - DO push the sprint-status + spec commits to remote (MR create needs them).
 - DO NOT skip the sprint-status sync.
+- Step 8 (tracker sync) is SOFT-FAIL — NEVER halt setup because the issue was
+  missing or the Skill errored. Only discovery failures HALT.
 - If discovery fails at any step, HALT with the failing field empty + clear error in storyKey.`,
   { label: `setup-${storyKey}`, phase: 'Setup', schema: SETUP_SCHEMA, agentType: 'general-purpose' }
 )
@@ -501,6 +527,7 @@ if (!shouldAcceptStoryStatus(setup.currentStatus)) {
     error: `story '${storyKey}' has unacceptable status '${setup.currentStatus}' — must be one of backlog | ready-for-dev | in-progress | review`,
   }
 }
+log(`Issue tracker: story ${storyKey} → in-progress ${setup.issueStatusSynced === true ? 'synced' : 'NOT synced (soft-fail)'}`)
 
 // ============================================================================
 // PHASE 2: CREATE MR (runs ONCE, before Build loop)
@@ -644,6 +671,31 @@ if (mergeCheckCmd) {
   }
   if (shouldShortCircuitOnAlreadyMerged(mergeCheckResult?.stdout)) {
     log(`Branch already merged into ${setup.baseBranch} — skipping build loop`)
+    // The story is done (branch merged by a prior run or externally), so its
+    // tracker issue must not stay stuck at in-progress. Sync status:done +
+    // closed here — converge is the sole writer of the story done label.
+    // Soft-fail: a missing issue or Skill error must not fail the run.
+    let alreadyMergedIssueSynced = false;
+    try {
+      const doneSync = await agent(
+        `The story branch for ${setup.storyKey} was already merged into ${setup.baseBranch} — the build loop is skipped. Sync the story issue to done + closed via the Skill.
+
+Invoke the Skill once (no other actions):
+   BMAD_ISSUE_ACTION=set-status \\
+   BMAD_ISSUE_KEY="${setup.storyKey}" \\
+   BMAD_ISSUE_PRD_KEY="${setup.prdKey}" \\
+   BMAD_ISSUE_NEW_STATUS="done" \\
+   BMAD_ISSUE_CLOSE=true \\
+       Skill: bmad-issue-tracking-sync
+
+Capture { issue_id }. Soft-fail by design — if the issue is not found or the
+Skill errors, log and continue. Return JSON { issue_id: "<id or empty string>" }.`,
+        { label: `issue-done-${setup.storyKey}`, phase: 'Auto-merge', schema: { type: 'object', properties: { issue_id: { type: 'string' } } }, agentType: 'general-purpose' }
+      );
+      alreadyMergedIssueSynced = !!(doneSync && doneSync.issue_id);
+    } catch (e) {
+      log(`Already-merged story issue sync failed for ${setup.storyKey}: ${e} — continuing (soft-fail)`)
+    }
     return {
       storyKey: setup.storyKey,
       converged: true,
@@ -653,7 +705,7 @@ if (mergeCheckCmd) {
       setup,
       mr: { mrIid: null, mrUrl: null, pipelineId: null, alreadyMerged: true },
       monitor: { status: 'success', retries: 0, transient: false, failedJobs: [] },
-      merge: { merged: true, sprintStatusDone: false, error: null, alreadyMerged: true },
+      merge: { merged: true, sprintStatusDone: false, issueStatusSynced: alreadyMergedIssueSynced, error: null, alreadyMerged: true },
       cleanup: { worktrees: [], branches: [], keptWorktrees: [], keptBranches: [], prunedRefs: 0, removedLogs: [], errors: [] },
     }
   }
@@ -1009,10 +1061,28 @@ STEPS:
    - Update last_updated to "${timestamp}".
    - \`git add ${setup.sprintStatusPath} && git commit -m "chore(sprint-status): story ${setup.storyKey} → done (MR !${mrResult.mrIid} merged)" && git push origin ${setup.baseBranch}\`
    - sprintStatusDone = true only if push succeeded.
+3. If merged=true, sync the story ISSUE to done + closed on the tracker
+   (soft-fail — never block the merge result on tracker sync; SKIP this step
+   entirely when merged=false). Invoke the Skill once:
+       BMAD_ISSUE_ACTION=set-status \\
+       BMAD_ISSUE_KEY="${setup.storyKey}" \\
+       BMAD_ISSUE_PRD_KEY="${setup.prdKey}" \\
+       BMAD_ISSUE_NEW_STATUS="done" \\
+       BMAD_ISSUE_CLOSE=true \\
+           Skill: bmad-issue-tracking-sync
+   Capture { issue_id }. Set issueStatusSynced=true when merged=true AND a
+   non-null issue_id is returned; false otherwise (merged=false, not-found, or
+   error). The Skill's update-issue-status atomic drops any existing status
+   label first (platform separator: status:: on GitLab, status: on GitHub),
+   adds status:done, and closes the issue (CLOSE=true). This merge agent is the
+   SOLE writer of the story done label.
 
-Note: when invoked from bmad-prd-orchestrate, the orchestrator may re-apply the done transition in Phase 4. sprint_plan.py advance is idempotent (never-regress), so a redundant write is a no-op. The merge agent here is the SOLE WRITER for standalone (non-orchestrator) invocations.
+Note: this merge agent owns the story issue lifecycle end-to-end (done + close).
+When invoked from bmad-prd-orchestrate, the orchestrator does NOT re-sync story
+issues in Phase 4 — it only advances the sprint-status YAML on the PRD branch and
+syncs EPIC issues (done + close) once every story of the epic is done.
 
-RETURN MERGE_SCHEMA (storyKey, mrIid, merged, sprintStatusDone, error?).`,
+RETURN MERGE_SCHEMA (storyKey, mrIid, merged, sprintStatusDone, issueStatusSynced, error?).`,
     { label: `merge-${setup.storyKey}`, phase: 'Auto-merge', schema: MERGE_SCHEMA, agentType: 'general-purpose' }
   )
 } else {
@@ -1020,10 +1090,10 @@ RETURN MERGE_SCHEMA (storyKey, mrIid, merged, sprintStatusDone, error?).`,
     ? `CI ${lastCIStatus || 'NOT CHECKED'}`
     : `spec status "${lastSpecStatus}" (human action required or unresolved blocker)`;
   log(`${reason} — NOT auto-merging. Manual review needed.`)
-  mergeResult = { storyKey: setup.storyKey, mrIid: mrResult.mrIid, merged: false, sprintStatusDone: false, error: reason }
+  mergeResult = { storyKey: setup.storyKey, mrIid: mrResult.mrIid, merged: false, sprintStatusDone: false, issueStatusSynced: false, error: reason }
 }
 
-log(`Merge: ${mergeResult.merged ? 'OK' : 'SKIPPED'} | Sprint-status: ${mergeResult.sprintStatusDone ? 'done' : 'pending'}`)
+log(`Merge: ${mergeResult.merged ? 'OK' : 'SKIPPED'} | Sprint-status: ${mergeResult.sprintStatusDone ? 'done' : 'pending'} | Story issue: ${mergeResult.issueStatusSynced ? 'done+closed' : 'NOT synced'}`)
 
 // ============================================================================
 // PHASE 5: CLEANUP
@@ -1093,7 +1163,7 @@ return {
   },
   mr: { mrIid: mrResult.mrIid, mrUrl: mrResult.mrUrl, pipelineId: mrResult.pipelineId },
   monitor: { status: lastCIStatus, retries: iteration > 1 ? iteration - 1 : 0, transient: false, failedJobs: ciFailure?.failedJobs || [] },
-  merge: { merged: mergeResult.merged, sprintStatusDone: mergeResult.sprintStatusDone, error: mergeResult.error },
+  merge: { merged: mergeResult.merged, sprintStatusDone: mergeResult.sprintStatusDone, issueStatusSynced: mergeResult.issueStatusSynced, error: mergeResult.error },
   cleanup: { worktrees: cleanup.removedWorktrees, branches: cleanup.deletedBranches, errors: cleanup.errors },
 }
 

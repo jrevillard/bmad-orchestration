@@ -40,11 +40,11 @@ Workflow({
 
 ## Behavior (phases)
 
-1. **Setup** — discover PRD worktree, read `issue-tracking.yaml`, create story worktree on `feat/<prdKey>/<storyKey>`, set spec status to `in-progress`.
-2. **Create MR** — open draft MR/PR from story branch to `feat/<prdKey>/prd` via `glab mr create`.
+1. **Setup** — discover PRD worktree, read `issue-tracking.yaml`, create story worktree on `feat/<prdKey>/<storyKey>`, set sprint-status to `in-progress`, and sync the story issue to `in-progress` on the tracker (soft-fail if the issue is missing).
+2. **Create MR** — open MR/PR from story branch to `feat/<prdKey>/prd` via `Skill: bmad-issue-tracking-sync` (`BMAD_MR_ACTION=ensure-mr`, then `find-mr` to resolve the IID).
 3. **Build with convergence** — loop `bmad-build-auto` until the story converges (status moves to `done` cleanly). Bounded by `maxIterations`.
 4. **CI fix** — poll pipeline status, dispatch CI-fix agent on failure. Bounded by `ciMaxIterations` (default 3).
-5. **Auto-merge** — `glab mr merge` on green CI.
+5. **Auto-merge** — merge on green CI via `Skill: bmad-issue-tracking-sync` (`BMAD_MR_ACTION=merge-mr`), then sync the story issue to `status:done` and close it (also done on the already-merged short-circuit). Converge is the sole writer of the story done transition.
 6. **Cleanup** — remove story worktree + branch.
 
 ## Output
