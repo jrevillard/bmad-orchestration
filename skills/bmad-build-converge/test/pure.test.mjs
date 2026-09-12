@@ -373,11 +373,11 @@ test('shouldShortCircuitOnAlreadyMerged returns true for exact MERGED', () => {
   assert.equal(fn('MERGED'), true);
 });
 
-test('shouldShortCircuitOnAlreadyMerged returns true for MERGED with whitespace', () => {
+test('shouldShortCircuitOnAlreadyMerged is case-insensitive (LLM may normalize case)', () => {
   const fn = extractFunction(source, 'shouldShortCircuitOnAlreadyMerged');
-  assert.equal(fn('MERGED\n'), true);
-  assert.equal(fn(' MERGED '), true);
-  assert.equal(fn('MERGED\r\n'), true);
+  assert.equal(fn('merged'), true);
+  assert.equal(fn('Merged'), true);
+  assert.equal(fn('MERGED'), true);
 });
 
 test('shouldShortCircuitOnAlreadyMerged returns false for OPEN', () => {

@@ -229,15 +229,17 @@ function buildMergeCheckCommand(setup) {
 }
 
 // shouldShortCircuitOnAlreadyMerged(stdout) → boolean
-// Pure: returns true iff the merge-check agent's stdout is exactly 'MERGED'
-// (trimmed). Anything else (OPEN, undefined, error shape, null,
+// Pure: returns true iff the merge-check agent's stdout indicates MERGED.
+// Trimmed case-insensitive comparison — bash `echo MERGED` outputs uppercase
+// but the wrapping agent LLM may normalize case (returns 'merged') or add
+// trailing whitespace. Anything else (OPEN, undefined, error shape, null,
 // empty string) returns false — build-converge falls through to the
 // normal convergence loop. Pure decision; no side effects. Extracted
 // so the call path's edge cases are unit-testable without mocking the
 // Workflow runtime's agent() global.
 function shouldShortCircuitOnAlreadyMerged(stdout) {
   if (typeof stdout !== 'string') return false;
-  return stdout.trim() === 'MERGED';
+  return stdout.trim().toUpperCase() === 'MERGED';
 }
 
 function base64Encode(input) {
