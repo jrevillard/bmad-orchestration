@@ -1026,6 +1026,14 @@ ${bashReadCmd}`,
       maxIterations,
       timestamp: timestamp + '-' + sk,
       helpersDir: args_.helpersDir || '',  // forward so sub-workflow's CI check can find ci-monitor.sh
+      // orchestrated: tells the sub-workflow that Phase 4 owns the sprint-status
+      // done transition, so it must not push that file itself. Pushing it made
+      // every closely-spaced merge rebase against a moving shared branch.
+      orchestrated: true,
+      // scriptPath: lets the sub-workflow's setup agent stamp the running revision
+      // into the run log (convergeScriptSha) — mid-run redeploys were otherwise
+      // invisible and made one run's stories behave differently.
+      scriptPath: convergeScriptPath,
     });
   } catch (e) {
     launchError = String(e);
@@ -1115,7 +1123,7 @@ ${bashReadCmd}`,
     // When it did not (soft-fail, issue not found yet), Phase 4 retries it.
     const storyIssueSynced = !!(convergeResult.merge && convergeResult.merge.issueStatusSynced === true);
     if (storyIssueSynced) syncedThisRun.push(sk);
-    await appendJournal({ event: 'converged', storyKey: sk, iteration: state.iterationCount, via: convergedVia, storyIssueSynced });
+    await appendJournal({ event: 'converged', storyKey: sk, iteration: state.iterationCount, via: convergedVia, storyIssueSynced, convergeScriptSha: convergeResult.setup && convergeResult.setup.convergeScriptSha || '' });
     if (!storyIssueSynced) {
       log(`Story ${sk} issue NOT synced by converge (soft-fail) — Phase 4 will retry the done+close sync`)
     }

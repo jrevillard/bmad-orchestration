@@ -476,3 +476,22 @@ test('guard: every schema property has a description', () => {
     }
   }
 });
+
+test('guard: exactly one writer of the story done label', () => {
+  // A second BMAD_ISSUE_NEW_STATUS="done" would be a competing writer sitting in
+  // an agent prompt — which is how the sync got silently dropped before (the merge
+  // agent ran out of turns on a rebase and never reached it). One writer, and it is
+  // the script-dispatched syncStoryIssueDone.
+  const hits = [...SCRIPT_SOURCE.matchAll(/BMAD_ISSUE_NEW_STATUS="done"/g)];
+  assert.equal(hits.length, 1,
+    `expected exactly 1 story done-status invocation (syncStoryIssueDone), found ${hits.length} — a prompt-side one can be skipped`);
+});
+
+test('guard: MERGE_SCHEMA does not carry issueStatusSynced', () => {
+  // The merge agent must have no say in the issue sync: the script computes
+  // issueStatusSynced from the sync agent's own result. Re-adding the field to the
+  // schema would put the outcome back under the agent's control.
+  const schema = extractObject(SCRIPT_SOURCE, 'MERGE_SCHEMA');
+  assert.ok(!Object.keys(schema.properties || {}).includes('issueStatusSynced'),
+    'MERGE_SCHEMA must not expose issueStatusSynced — the script owns that value');
+});
