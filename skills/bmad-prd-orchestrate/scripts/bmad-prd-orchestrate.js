@@ -974,11 +974,15 @@ ${bashReadCmd}`,
   let convergeResult = null;
   let launchError = null;
   try {
-    // workflow(nameOrRef, args?) is a 2-arg call: first is the name/scriptPath ref,
+    // Workflow(nameOrRef, args?) is a 2-arg call: first is the name/scriptPath ref,
     // second is the args object. Passing args as a KEY inside the options object
-    // (e.g. workflow({scriptPath, args: {...}})) is silently ignored — the sub-workflow
-    // sees args=undefined and crashes on args.storyKey.
-    convergeResult = await workflow({ scriptPath: convergeScriptPath }, {
+    // (e.g. Workflow({scriptPath, args: {...}})) is silently ignored — the sub-workflow
+    // sees args=undefined and crashes on args.storyKey. NOTE: Workflow is the
+    // global injected by the Workflow tool — capital W. Lowercase `workflow`
+    // is undefined and throws TypeError → launch_failure handler fires →
+    // every story marked blocked. (Bug observed 2026-09-12 with story 1-2:
+    // 17 agents in 25s, zero sub-workflow mr-create/build/merge dispatched.)
+    convergeResult = await Workflow({ scriptPath: convergeScriptPath }, {
       storyKey: sk,
       maxIterations,
       timestamp: timestamp + '-' + sk,
