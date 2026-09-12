@@ -889,3 +889,43 @@ test('guard: every schema property has a description', () => {
     }
   }
 });
+
+test('guard: writeState is never awaited outside persistState', () => {
+  // persistState checks the returned {written} and retries. A direct
+  // `await writeState(...)` anywhere else discards the result — which is how a
+  // failed write stayed silent while the on-disk state drifted behind a live run.
+  const start = SCRIPT_SOURCE.indexOf('async function persistState(');
+  const end = SCRIPT_SOURCE.indexOf('async function writeState(');
+  assert.ok(start > -1 && end > start, 'persistState/writeState not found in script source');
+  const outside = SCRIPT_SOURCE.slice(0, start) + SCRIPT_SOURCE.slice(end);
+  const hits = [...outside.matchAll(/await writeState\(/g)];
+  assert.equal(hits.length, 0,
+    `found ${hits.length} writeState call site(s) outside persistState — those ignore the {written} result`);
+});
+
+test('guard: the per-story loop persists state on every iteration', () => {
+  // The loop used to write state only on halt paths, so a run that progressed
+  // without halting never updated state.json (observed: 33 minutes and three
+  // stories behind its own journal). Anchored on the comment so that removing
+  // either the persist call or the explanation trips this guard.
+  assert.match(SCRIPT_SOURCE, /\/\/ Persist after EVERY story[\s\S]{0,400}?persistOrHalt\(state\)/,
+    'the per-story loop must persist via persistOrHalt(state) right after storyQueue.shift()');
+});
+
+test('guard: a failed state write stops the run', () => {
+  // Sites where the run CONTINUES after persisting must go through persistOrHalt.
+  // Sites that halt on the next line keep plain persistState — the run is stopping
+  // anyway and the halt context is returned from memory.
+  assert.ok(SCRIPT_SOURCE.includes("'state_write_failed'"),
+    'persistOrHalt must build a halt context with the state_write_failed reason');
+  const sites = [...SCRIPT_SOURCE.matchAll(/persistOrHalt\(/g)].length;
+  assert.ok(sites >= 6,
+    `expected at least 6 persistOrHalt call sites (per-story, 3 plan-phase, pre-loop, post-loop), found ${sites}`);
+});
+
+test('userOptionsForHaltReason knows state_write_failed', () => {
+  const fn = extractFunction(SCRIPT_SOURCE, 'userOptionsForHaltReason');
+  // Spread into a host-realm array: the vm context's Array.prototype differs, so
+  // deepEqual would fail on prototype identity (same idiom as the other tests here).
+  assert.deepEqual([...fn('state_write_failed')], ['continue', 'abort_prd']);
+});

@@ -192,6 +192,9 @@ function userOptionsForHaltReason(reason) {
     merge_conflict:       ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
     epic_boundary:        ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
     final_complete:       ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'],
+    // State could not be persisted — the run stopped rather than proceed on state
+    // that is not on disk. 'continue' retries the write.
+    state_write_failed:   ['continue', 'abort_prd'],
   };
   return byReason[reason] || ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'];
 }
@@ -522,13 +525,16 @@ if (userChoice) {
       ? `Resuming with confirm_deps (+ edited confirmedDeps entries: ${Array.isArray(confirmedDeps) ? confirmedDeps.length : Object.keys(confirmedDeps).length})`
       : `Resuming with confirm_deps (using inferred graph as-is, entries: ${planResult.inferred?.length || 0})`);
     if (confirmedDeps) log(`Updated inferred to ${planResult.inferred.length} confirmed entries`);
-    await writeState(buildPlanState());
+    const wsHalt = await persistOrHalt(buildPlanState());
+    if (wsHalt) return wsHalt;
   } else if (userChoice === 'proceed_without_inference') {
     log(`Resuming with proceed_without_inference (clearing inferred graph)`);
-    await writeState(buildPlanState());
+    const wsHalt = await persistOrHalt(buildPlanState());
+    if (wsHalt) return wsHalt;
   } else {
     log(`WARNING: unrecognized userChoice=${userChoice}; falling through to Phase 3`);
-    await writeState(buildPlanState());
+    const wsHalt = await persistOrHalt(buildPlanState());
+    if (wsHalt) return wsHalt;
   }
 } else if (resume) {
   // Resume token without userChoice → re-halt with the LATEST halt from
@@ -539,7 +545,7 @@ if (userChoice) {
   // (last in array — halts are appended in order); fall back to
   // dep_inference_confirm if state.halts is empty (rare edge case).
   log(`Resume token provided but no userChoice; re-halting`)
-  await writeState(buildPlanState())
+  await persistState(buildPlanState())
   const reHaltReason = pickReHaltReason(state.halts);
   const userOptions = userOptionsForHaltReason(reHaltReason);
   const latestHalt = (state.halts && state.halts.length > 0) ? state.halts[state.halts.length - 1] : null;
@@ -551,7 +557,7 @@ if (userChoice) {
 } else if (inferDeps && !noInfer && !autoAcceptDeps && planResult.inferred.length > 0) {
   // First-run halt to confirm inferred graph
   log('Halting to confirm inferred dependency graph...')
-  await writeState(buildPlanState())
+  await persistState(buildPlanState())
   return buildHaltContext(
     'dep_inference_confirm',
     { inferred: planResult.inferred, storyQueue: planResult.storyQueue },
@@ -560,7 +566,8 @@ if (userChoice) {
 } else {
   // No inferred deps — persist and fall through to Phase 3
   log('No inferred deps — persisting state and falling through to Phase 3')
-  await writeState(buildPlanState())
+  const wsHalt = await persistOrHalt(buildPlanState());
+  if (wsHalt) return wsHalt;
 }
 
 // DEBUG: diagnostic — was Phase 3 supposed to start here?
@@ -595,6 +602,50 @@ let state = {
 // State persistence helpers (Phase 3 owns these; Task 2 inlined a parallel helper for plan-time).
 // Declared as function declarations so they hoist — Phase 2 already calls writeState
 // before this source position executes (TDZ on `const` would otherwise throw).
+// persistState(stateObj) → boolean
+// writeState + verification. writeState returns the agent's {written, path}, and
+// every call site used to discard it: a failed write was completely silent — no
+// log, no journal, no halt — while the run carried on with state on disk that no
+// longer matched reality. A live run was observed 33 minutes and three stories
+// behind its own journal for exactly this reason.
+//
+// Retries once (the write goes through an LLM agent, so a single transient
+// failure is plausible), then journals state_write_failed and returns false.
+// Deliberately does NOT halt: sprint-status is the planning ground truth, so a
+// stale state file costs a redundant re-dispatch, not correctness — while halting
+// on a flaky agent would stop the whole PRD.
+async function persistState(stateObj) {
+  let res = await writeState(stateObj);
+  if (res && res.written === true) return true;
+  log(`State persist returned ${JSON.stringify(res)} — retrying once`)
+  res = await writeState(stateObj);
+  if (res && res.written === true) return true;
+  log(`WARNING: state persist failed twice (${JSON.stringify(res)}) — resume state is stale`)
+  await appendJournal({ event: 'state_write_failed', result: res || null });
+  return false;
+}
+
+// persistOrHalt(stateObj) → halt context | null
+// Persist state, and when the write cannot be made durable, STOP: return a halt
+// context instead of letting the run continue on in-memory state that is not on
+// disk. Continuing is how a resume ends up re-running stories that already
+// converged or already blocked.
+//
+// Call sites read:  const h = await persistOrHalt(state); if (h) return h;
+// Sites that are about to halt anyway (they return buildHaltContext on the very
+// next line) keep plain persistState — the run is stopping regardless, and the
+// halt context is returned from memory.
+async function persistOrHalt(stateObj) {
+  if (await persistState(stateObj)) return null;
+  return buildHaltContext('state_write_failed', {
+    completed: stateObj.completed,
+    blocked: stateObj.blocked,
+    skipped: stateObj.skipped,
+    awaitingOperator: stateObj.awaitingOperator,
+    halts: stateObj.halts,
+  }, timestamp, runDir, ['continue', 'abort_prd']);
+}
+
 async function writeState(stateObj) {
   // Write state.json + deps.json atomically via base64-encoded echo + decode.
   // Base64 eliminates quoting hazards (state may contain single quotes, backticks,
@@ -773,7 +824,7 @@ if (resume) {
     log(`skip_blocked: moved ${(state.skipped || []).length} blocked stories to skipped[]`)
   } else if (userChoice === 'abort_prd') {
     log('User aborted PRD; returning final report')
-    await writeState(state);
+    await persistState(state);
     await appendJournal({ event: 'abort_prd', queueSize: state.storyQueue.length });
     return { haltReason: 'final_complete', aborted: true, context: state, runDir };
   } else if (userChoice === 'fix_then_resume') {
@@ -837,7 +888,7 @@ STEPS:
     if (!resetResult.pushed) {
       log(`fix_then_resume push FAILED: ${resetResult.error || 'unknown'}; halting for operator review`)
       state.halts.push({ reason: 'fix_then_resume_push_failed', iteration: state.iterationCount, details: resetResult.error || null });
-      await writeState(state);
+      await persistState(state);
       await appendJournal({ event: 'halt_fix_then_resume_push', error: resetResult.error || 'unknown' });
       return buildHaltContext('fix_then_resume_push_failed', { resetResult, completed: state.completed, blocked: state.blocked, runDir }, timestamp, runDir, ['continue', 'retry_blocked', 'abort_prd']);
     }
@@ -864,7 +915,7 @@ Return JSON: { remoteSha: <exact stdout string>, exitCode: <integer> }. Do NOT m
     if (shaVerify.exitCode !== 0 || shaVerify.remoteSha !== resetResult.commitSha) {
       log(`fix_then_resume SHA VERIFY FAILED: local commitSha=${resetResult.commitSha} remote=${shaVerify.remoteSha} exitCode=${shaVerify.exitCode}; halting`)
       state.halts.push({ reason: 'fix_then_resume_sha_verify_failed', iteration: state.iterationCount, details: { localSha: resetResult.commitSha, remoteSha: shaVerify.remoteSha, exitCode: shaVerify.exitCode } });
-      await writeState(state);
+      await persistState(state);
       await appendJournal({ event: 'halt_fix_then_resume_sha_verify', localSha: resetResult.commitSha, remoteSha: shaVerify.remoteSha });
       return buildHaltContext('fix_then_resume_sha_verify_failed', { resetResult, shaVerify, runDir }, timestamp, runDir, ['continue', 'retry_blocked', 'abort_prd']);
     }
@@ -876,7 +927,10 @@ Return JSON: { remoteSha: <exact stdout string>, exitCode: <integer> }. Do NOT m
 }
 
 // Persist loop state before starting iteration (resume safety)
-await writeState(state);
+{
+  const wsHalt = await persistOrHalt(state);
+  if (wsHalt) return wsHalt;
+}
 
 // Per-story loop
 let lastEpic = null;
@@ -940,7 +994,7 @@ Capture { issue_id } from stdout. If the Skill reports the issue was not found, 
   if (shouldHaltAtEpicTransition(hitlEveryEpic, lastEpic, currentEpic)) {
     log(`Epic-boundary HITL: ${lastEpic} → ${currentEpic} at iteration ${state.iterationCount}`)
     state.halts.push({ reason: 'epic_boundary', iteration: state.iterationCount, details: { from: lastEpic, to: currentEpic } });
-    await writeState(state);
+    await persistState(state);
     await appendJournal({ event: 'halt_epic_boundary', iteration: state.iterationCount, from: lastEpic, to: currentEpic });
     return buildHaltContext(
       'epic_boundary',
@@ -1049,7 +1103,7 @@ ${bashReadCmd}`,
     state.blocked.push({ story: sk, reason: 'launch_failed', details: launchError });
     state.storyQueue.shift();
     state.halts.push({ reason: 'launch_failure', story: sk, iteration: state.iterationCount, details: launchError });
-    await writeState(state);
+    await persistState(state);
     await appendJournal({ event: 'halt_launch_failure', storyKey: sk, iteration: state.iterationCount, error: launchError });
     return buildHaltContext(
       'launch_failure',
@@ -1068,7 +1122,7 @@ ${bashReadCmd}`,
     state.blocked.push({ story: sk, reason: 'merge_conflict', details: String(convergeResult.aborted) });
     state.halts.push({ reason: 'merge_conflict', story: sk, iteration: state.iterationCount, details: String(convergeResult.aborted) });
     state.storyQueue.shift();
-    await writeState(state);
+    await persistState(state);
     await appendJournal({ event: 'halt_merge_conflict', storyKey: sk, iteration: state.iterationCount, details: String(convergeResult.aborted) });
     return buildHaltContext(
       'merge_conflict',
@@ -1089,7 +1143,7 @@ ${bashReadCmd}`,
     state.blocked.push({ story: sk, reason: 'ci_hardfail', details: { ciStatus, failedJobs: convergeResult.monitor.failedJobs, retries: convergeResult.monitor.retries, transient: convergeResult.monitor.transient } });
     state.halts.push({ reason: 'ci_hardfail', story: sk, iteration: state.iterationCount, details: { ciStatus, failedJobs: convergeResult.monitor.failedJobs } });
     state.storyQueue.shift();
-    await writeState(state);
+    await persistState(state);
     await appendJournal({ event: 'halt_ci_hardfail', storyKey: sk, iteration: state.iterationCount, ciStatus });
     return buildHaltContext(
       'ci_hardfail',
@@ -1102,7 +1156,7 @@ ${bashReadCmd}`,
     state.blocked.push({ story: sk, reason: 'merge_blocked', details: convergeResult.merge.error || null });
     state.halts.push({ reason: 'merge_blocked', story: sk, iteration: state.iterationCount, details: convergeResult.merge.error || null });
     state.storyQueue.shift();
-    await writeState(state);
+    await persistState(state);
     await appendJournal({ event: 'halt_merge_blocked', storyKey: sk, iteration: state.iterationCount, error: convergeResult.merge.error });
     return buildHaltContext(
       'merge_blocked',
@@ -1135,11 +1189,19 @@ ${bashReadCmd}`,
 
   state.storyQueue.shift();
 
+  // Persist after EVERY story. Previously the loop wrote state only on halt paths,
+  // so a run that progressed without halting never updated state.json: a live run
+  // was observed 33 minutes and three stories behind its own journal (completed
+  // missing a converged story, blocked missing a blocked one), which is exactly
+  // what makes a resume re-run finished work.
+  const loopWriteHalt = await persistOrHalt(state);
+  if (loopWriteHalt) return loopWriteHalt;
+
   // Periodic HITL halt
   if (!hitlFinalOnly && hitlEvery > 0 && state.iterationCount % hitlEvery === 0) {
     log(`Periodic HITL checkpoint at iteration ${state.iterationCount}`)
     state.halts.push({ reason: 'periodic_review', iteration: state.iterationCount });
-    await writeState(state);
+    await persistState(state);
     await appendJournal({ event: 'halt_periodic', iteration: state.iterationCount });
     return buildHaltContext(
       'periodic_review',
@@ -1151,7 +1213,10 @@ ${bashReadCmd}`,
 
 // Loop exited cleanly: queue empty
 log(`Execute loop complete: completed=${state.completed.length} blocked=${state.blocked.length} skipped=${state.skipped.length} awaitingOperator=${state.awaitingOperator.length}`)
-await writeState(state);
+{
+  const wsHalt = await persistOrHalt(state);
+  if (wsHalt) return wsHalt;
+}
 await appendJournal({ event: 'execute_complete', completed: state.completed.length, blocked: state.blocked.length, skipped: state.skipped.length, awaitingOperator: state.awaitingOperator.length, halts: state.halts.length });
 
 // ============================================================================
@@ -1355,7 +1420,7 @@ where <epicKey> entries are the epics whose retro key is NOT 'done' (i.e., the r
   } else if (userChoice !== 'proceed_retro' && userChoice !== 'skip_retro') {
     // Halt for user approval before invoking retros (the brief mandates a manual gate here).
     log(`Halting for retro approval: ${retrosNeeded.length} epic(s) ready for retrospective...`)
-    await writeState(state);
+    await persistState(state);
     await appendJournal({ event: 'halt_epic_retro', epics: retrosNeeded });
     return buildHaltContext('epic_retro', { retrosNeeded, completed: state.completed, blocked: state.blocked, runDir }, timestamp, runDir, ['proceed_retro', 'skip_retro', 'abort_prd']);
   } else if (userChoice === 'skip_retro') {
@@ -1451,7 +1516,10 @@ const finalReport = {
   iterations: state.iterationCount,
   haltReason: 'final_complete',
 }
-await writeState(state);
+// Deliberately NOT persistOrHalt: the run is over and the report below is the
+// deliverable. State was already made durable after the loop, so a failure here
+// costs nothing — halting would throw away a completed run's results.
+await persistState(state);
 await appendJournal({
   event: 'final_complete',
   completed: state.completed.length,
