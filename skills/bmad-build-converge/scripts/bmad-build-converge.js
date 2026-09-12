@@ -212,16 +212,20 @@ function parseDispatchEnvelope(stdoutText) {
 // buildMergeCheckCommand(setup) → string
 // Pure: returns the bash command to check if origin/<storyBranch> is already
 // an ancestor of origin/<baseBranch> (i.e. branch was merged). Caller
-// executes via dispatchViaClaudeP (the established agent transport).
-// Lives in build-converge.js (not shared lib — Workflow-tool JS files
-// can't import each other per `tout dans le même fichier` constraint).
+// executes via `agent()` (NOT `dispatchViaClaudeP` — that requires a
+// schema and returns a parsed envelope; without a schema it errors, and
+// `parseDispatchEnvelope` returns `{error:...}` which can't be `.trim()`-ed —
+// would TypeError on every call).
 function buildMergeCheckCommand(setup) {
   if (!setup || !setup.baseBranch || !setup.storyBranch) return '';
   const cwd = setup.prdWorktreePath || setup.repoRoot || '';
+  // Escape single-quotes in branch names (rare but possible).
+  const safeBase = String(setup.baseBranch).replace(/'/g, "'\\''");
+  const safeStory = String(setup.storyBranch).replace(/'/g, "'\\''");
   // Fetch both refs (cheap, idempotent), then `merge-base --is-ancestor` exits 0
   // if origin/<storyBranch> is reachable from origin/<baseBranch>.
-  return `git -C '${cwd}' fetch origin '${setup.baseBranch}' '${setup.storyBranch}' >/dev/null 2>&1; ` +
-    `git -C '${cwd}' merge-base --is-ancestor 'origin/${setup.storyBranch}' 'origin/${setup.baseBranch}' && echo MERGED || echo OPEN`;
+  return `git -C '${cwd}' fetch origin '${safeBase}' '${safeStory}' >/dev/null 2>&1; ` +
+    `git -C '${cwd}' merge-base --is-ancestor 'origin/${safeStory}' 'origin/${safeBase}' && echo MERGED || echo OPEN`;
 }
 
 function base64Encode(input) {
@@ -603,20 +607,34 @@ let lastSpecStatus = null;
 log(`Checking if branch ${setup.storyBranch} is already merged into ${setup.baseBranch}...`)
 const mergeCheckCmd = buildMergeCheckCommand(setup)
 if (mergeCheckCmd) {
-  const mergeCheck = await dispatchViaClaudeP({
-    label: `merge-check-${setup.storyKey}`,
-    phase: 'Build with convergence',
-    cwd: setup.worktreePath,
-    prompt: `Run this exact bash command. Return its stdout verbatim. Do NOT modify, summarize, or diagnose.\n\nCOMMAND:\n${mergeCheckCmd}`,
-    allowedTools: ['Bash'],
-  });
-  if ((mergeCheck || '').trim() === 'MERGED') {
+  // Use `agent()` (NOT `dispatchViaClaudeP`) with a simple stdout schema.
+  // `dispatchViaClaudeP` requires a schema and the underlying `claude -p`
+  // invocation only emits `structured_output` when a schema is provided.
+  // Without a schema, `parseDispatchEnvelope` returns `{error: ...}` —
+  // calling `.trim()` on that throws TypeError. So we use a direct
+  // `agent()` call with a stdout schema (returns as a string field).
+  // Soft-fail: any error/exception → treat as OPEN (don't short-circuit).
+  let mergeCheckResult = null;
+  try {
+    mergeCheckResult = await agent(
+      `Run this exact bash command. Return its raw stdout verbatim in the "stdout" field. Do NOT modify, summarize, or diagnose.\n\nCOMMAND:\n${mergeCheckCmd}`,
+      { label: `merge-check-${setup.storyKey}`, phase: 'Build with convergence', schema: {
+        type: 'object',
+        properties: { stdout: { type: 'string' }, exitCode: { type: 'integer' } },
+        required: ['stdout'],
+      }, agentType: 'general-purpose' }
+    );
+  } catch (e) {
+    log(`merge-check agent failed: ${e} — falling through to convergence loop`)
+    mergeCheckResult = null;
+  }
+  if (mergeCheckResult && typeof mergeCheckResult.stdout === 'string' && mergeCheckResult.stdout.trim() === 'MERGED') {
     log(`Branch already merged into ${setup.baseBranch} — skipping build loop`)
     return {
       storyKey: setup.storyKey,
       converged: true,
       iterations: 0,
-      finalSha: setup.baselineSha,
+      finalSha: null,  // no new commits — branch tip in base is unknown without extra fetch
       iterationsLog: [{ iteration: 0, note: 'branch already merged into base — convergence loop skipped' }],
       setup,
       mr: { mrIid: null, mrUrl: null, pipelineId: null, alreadyMerged: true },
