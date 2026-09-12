@@ -42,6 +42,25 @@ npx skills add /absolute/path/to/bmad-orchestration --skill bmad-build-converge 
 
 The install drops copies into `.claude/skills/`, `.agents/skills/`, and other agent dirs. For live iteration against source changes, `npx skills add` produces snapshots (not symlinks) for cross-repo sources — re-run on each source change, or symlink manually.
 
+### Deploying edits to the test worktree
+
+The live test harness lives in a consumer worktree (e.g.
+`/home/jerome/git_projects/bmad-test-tracking/.claude/worktrees/prd-test-loop-v2/`).
+After editing the scripts here, copy them into that worktree's `.agents/skills/` before
+re-running:
+
+```bash
+TEST_WT=/home/jerome/git_projects/bmad-test-tracking/.claude/worktrees/prd-test-loop-v2
+cp skills/bmad-prd-orchestrate/scripts/bmad-prd-orchestrate.js "$TEST_WT/.agents/skills/bmad-prd-orchestrate/scripts/"
+cp skills/bmad-build-converge/scripts/bmad-build-converge.js   "$TEST_WT/.agents/skills/bmad-build-converge/scripts/"
+# tests too, so the guard tests run against the deployed copy:
+mkdir -p "$TEST_WT/.agents/skills/bmad-prd-orchestrate/test"
+cp skills/bmad-prd-orchestrate/test/*.mjs "$TEST_WT/.agents/skills/bmad-prd-orchestrate/test/"
+```
+
+Only the **scripts** (and optionally tests) need deploying — the `docs/` diagrams are
+developer references, not consumed at runtime.
+
 ## Pre-commit check
 
 Both scripts end with `const main = async () => { ... };` followed by a **top-level
