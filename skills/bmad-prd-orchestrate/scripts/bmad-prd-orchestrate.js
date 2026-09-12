@@ -1162,7 +1162,21 @@ CONSTRAINTS:
 - DO NOT modify any other tracked file.
 - DO NOT skip commit + push when advanced > 0 — without it the remote stays stale.
 - The orchestrator is the SOLE writer of the done transition; the converge setup
-  agent only writes 'in-progress' on the story branch.`,
+  agent only writes 'in-progress' on the story branch.
+
+6.5. SYNC GITHUB ISSUE LABELS (mandatory — without this, issues stay stuck
+     at 'status:backlog' while sprint-status.yaml says 'done'). For each
+     story in COMPLETED_STORIES AND for each epic in advancedEpics, invoke
+     the Skill (one-shot per entity):
+       BMAD_ISSUE_ACTION=set-status \\
+       BMAD_ISSUE_KEY="<story-or-epic-key>" \\
+       BMAD_ISSUE_PRD_KEY="${setup.prdKey}" \\
+       BMAD_ISSUE_NEW_STATUS="done" \\
+       BMAD_ISSUE_CLOSE=false \\
+           Skill: bmad-issue-tracking-sync
+     Use allowedTools: ['Skill']. Capture { issue_id } from each. Soft-fail
+     any individual issue not found (don't block the rest). Return
+     labelsSynced: <count>.`,
   { label: `sprint-status-sync-${timestamp}`, phase: 'Epic boundary', schema: {
     type: 'object',
     properties: {
@@ -1171,8 +1185,9 @@ CONSTRAINTS:
       committed: { type: 'boolean' },
       pushed: { type: 'boolean' },
       projectName: { type: 'string' },
+      labelsSynced: { type: 'integer' },
     },
-    required: ['advanced', 'advancedEpics', 'committed', 'pushed'],
+    required: ['advanced', 'advancedEpics', 'committed', 'pushed', 'labelsSynced'],
   }, agentType: 'general-purpose' }
 );
 
