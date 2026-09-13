@@ -19,7 +19,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -170,6 +170,43 @@ test('integration: BOTH scripts end with top-level `return await main();` (not b
 // list". It bit this project three times in one session, each time only caught by
 // remembering to run the check by hand.
 // ============================================================================
+
+// ============================================================================
+// No platform CLI or API in this repo. The bmad-issue-tracking module owns that
+// abstraction; our scripts reach it only through Skill: bmad-issue-tracking-sync or by
+// executing one of the module's workflow atomics. Hardcoding a platform call is how a
+// generic module ends up shipping one consumer's host — the deleted ci-monitor.sh polled
+// api/v4/.../pipelines/$ID with curl and baked-in GITLAB_HOST/GITLAB_PROJECT_ID defaults.
+// ============================================================================
+
+test('guard: no platform CLI or tracker API anywhere in this repo', () => {
+  const skillDir = join(__dirname, '../..');           // skills/
+  const targets = [];
+  for (const s of ['bmad-prd-orchestrate', 'bmad-build-converge']) {
+    targets.push(join(skillDir, s, 'scripts', `${s}.js`));
+    const shDir = join(skillDir, s, 'scripts');
+    if (existsSync(shDir)) {
+      for (const f of readdirSync(shDir)) {
+        if (f.endsWith('.sh')) targets.push(join(shDir, f));
+      }
+    }
+  }
+  const forbidden = [
+    [/\bglab\b/, 'glab CLI'],
+    [/\bgh (?:api|issue|pr|mr|run|workflow|repo)\b/, 'gh CLI'],
+    [/\bapi\/v4\b/, 'a raw GitLab API path'],
+    [/\bapi\.github\.com\b/, 'a raw GitHub API path'],
+    [/\bPRIVATE-TOKEN\b/i, 'a tracker token header'],
+  ];
+  for (const p of targets) {
+    const src = readFileSync(p, 'utf8');
+    for (const [re, what] of forbidden) {
+      const m = src.match(re);
+      assert.ok(!m, `${p.replace(skillDir + '/', '')}: contains ${what} (${m && m[0]}) — route it `
+        + `through the module instead: Skill: bmad-issue-tracking-sync, or execute the module's atomic`);
+    }
+  }
+});
 
 test('both workflow scripts parse after stripping the top-level return', () => {
   for (const [label, path] of [['orchestrator', ORCHESTRATOR_PATH], ['converge', CONVERGE_PATH]]) {

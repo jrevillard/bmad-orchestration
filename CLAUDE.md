@@ -17,7 +17,9 @@ Both skills share the same module key (`bmad-orchestration`) and version (`1.0.0
 
 **Cross-skill dispatch contract.** The orchestrator's SKILL.md dispatcher passes `args.buildConvergeScriptPath` (resolved as `<skill_root_parent>/bmad-build-converge/scripts/bmad-build-converge.js`). The orchestrator script reads this arg and calls `workflow({ scriptPath: convergeScriptPath }, {...})`. The two skills MUST install in the same `npx skills add` invocation (they share the parent dir at install time). If you change either script's path, update both `SKILL.md` dispatcher blocks.
 
-**Helper scripts** (`write-state.sh`, `orchestrate-helper.sh`, `ci-monitor.sh`) live in each skill's `scripts/` folder. Passed via `args.helpersDir` so the JS finds them at runtime regardless of install location. Each skill has its own copy (not shared) — keep them in sync if you edit one.
+**Helper scripts** (`write-state.sh`, `orchestrate-helper.sh`) live in each skill's `scripts/` folder. Passed via `args.helpersDir` so the JS finds them at runtime regardless of install location. Each skill has its own copy (not shared) — keep them in sync if you edit one.
+
+**No platform CLI or API in this repo.** `glab`, `gh`, and raw tracker/pipeline HTTP calls belong to the `bmad-issue-tracking` module, which owns the abstraction; this repo reaches them only through `Skill: bmad-issue-tracking-sync` or by executing one of the module's workflow atomics. The former `ci-monitor.sh` helper was deleted for breaking that rule: it polled `api/v4/.../pipelines/$ID` with `curl` and a `PRIVATE-TOKEN` header — GitLab hardcoded, with one consumer's `GITLAB_HOST`/`GITLAB_PROJECT_ID` baked into a generic module's default. The module's `common/wait-for-green-ci.yaml` does the same job cross-platform (gitlab **and** github branches, 30 s poll, 30 min timeout, failed-job diagnostics included), so converge's CI gate now executes that instead. Guarded by `test/integration.test.mjs`, which scans both scripts **and** both skills' `scripts/*.sh`.
 
 ## Flow reference diagrams
 

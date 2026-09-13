@@ -1245,7 +1245,7 @@ ${bashReadCmd}`,
       storyKey: sk,
       maxIterations,
       timestamp: timestamp + '-' + sk,
-      helpersDir: args_.helpersDir || '',  // forward so sub-workflow's CI check can find ci-monitor.sh
+      helpersDir: args_.helpersDir || '',  // forward so the sub-workflow finds write-state.sh / orchestrate-helper.sh
       // orchestrated: tells the sub-workflow that Phase 4 owns the sprint-status
       // done transition, so it must not push that file itself. Pushing it made
       // every closely-spaced merge rebase against a moving shared branch.

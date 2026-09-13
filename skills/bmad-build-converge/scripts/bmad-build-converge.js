@@ -687,7 +687,8 @@ STEPS:
     post-build-dispatch → post-dev-complete), which pushes, ensures the MR, waits for CI,
     writes ci-status.json, updates the issue and posts comments. This orchestrator already
     does all of the machinery itself — it pushes (step 7 and the post-build agent), ensures
-    the MR (phase 2), polls the pipeline (scripts/ci-monitor.sh) and merges (phase C) — so
+    the MR (phase 2), polls the pipeline (the module's wait-for-green-ci atomic) and merges
+    (phase C) — so
     running the chain too is a pure duplicate. Worse, its CI wait re-introduces inside every
     build dispatch the delay the convergence loop deliberately removed ("NO CI WAIT …
     saves ~3-5min per iter"); the run traces measured it at 47-305 s per dispatch.
@@ -1107,19 +1108,33 @@ while (ciIter < ciMaxIterations) {
   ciIter++;
   log(`--- CI iter ${ciIter}/${ciMaxIterations} ---`)
   const ciCheck = await agent(
-    `Check CI for MR !${mrResult.mrIid} (story ${setup.storyKey}, CI iter ${ciIter}).
-
-MR was created in Phase 2 — guaranteed to exist. Use MR pipeline only.
+    `Check CI for story ${setup.storyKey} (CI iter ${ciIter}) by executing the module's own
+CI-wait atomic. It is cross-platform and already does the whole job — resolving the MR,
+polling to a terminal state, and fetching failed-job diagnostics — so do NOT invoke the
+platform CLI and do NOT poll anything yourself.
 
 STEPS:
-1. Get latest MR pipeline: BMAD_MR_ACTION=get-mr-pipeline BMAD_MR_REPO="${setup.mrRepo}" BMAD_MR_IID=${mrResult.mrIid} Skill: bmad-issue-tracking-sync. Capture { pipeline_id, pipeline_status }.
-2. Poll status: \`Bash(command="${args.helpersDir || ''}ci-monitor.sh <pipelineId> 30", run_in_background=true)\` + \`TaskOutput(block=true, timeout=1800000)\`. Read the "TERMINAL:<status>" line.
-3. If status='success': return { pipelineId, status: 'success' }.
-4. If status != 'success': classify failure.
-   - BMAD_MR_ACTION=get-failed-jobs BMAD_MR_REPO="${setup.mrRepo}" BMAD_PIPELINE_ID=<pipeline_id> Skill: bmad-issue-tracking-sync.
-   - Capture { jobs } (newline-separated TSV per common/get-failed-jobs.yaml header — each line is "name<TAB>exit_code<TAB>trace_tail"; note snake_case exit_code field, NOT camelCase exitCode).
-   - Transform into failedJobs=[{name, exitCode, excerpt: trace_tail}] + traceTail=concatenated trace_tails (best-effort).
-5. Return JSON: { pipelineId, status, failedJobs: [{name, exitCode, excerpt}], traceTail: <concatenated excerpts> }`,
+1. Read ${setup.worktreePath}/_bmad/_config/custom/bmad-workflow-lang.md for the workflow
+   language specification.
+2. Execute ${setup.worktreePath}/_bmad/_config/custom/workflows/common/check-config.yaml
+   IN FULL — it populates git_platform, platform, host, project and project_enc.
+3. Execute ${setup.worktreePath}/_bmad/_config/custom/workflows/common/wait-for-green-ci.yaml
+   IN FULL, with current_branch="${setup.storyBranch}" in scope. It resolves the MR from that
+   branch (check-mr-ci → find-mr, i.e. the MR pipeline created in Phase 2), polls every 30s up
+   to 30 min, and on failure INCLUDEs get-failed-jobs for diagnostics.
+4. Read its outputs: ci_status ("passed" | "no_ci" | "no_mr" | "running" | "failed" |
+   "timeout"), pipeline_id, and jobs (failed-job diagnostics — on gitlab a newline-separated
+   TSV, each line "name<TAB>exit_code<TAB>trace_tail" with a snake_case exit_code field, NOT
+   camelCase; on github raw text).
+5. Map it onto the return schema:
+   - ci_status "passed" or "no_ci" → status "success". no_ci means the repo runs no CI;
+     treating that as a failure would block the story forever. pipelineId from pipeline_id.
+   - anything else → status "failed". Build failedJobs=[{name, exitCode, excerpt}] from its jobs output
+     (best-effort — an unparseable line becomes one job whose excerpt is the raw line, rather
+     than being dropped) and traceTail = the concatenated excerpts.
+   If the module's files are absent under ${setup.worktreePath}, return status "failed" with a
+   traceTail saying so — do NOT fall back to a platform call.
+6. Return JSON: { pipelineId, status, failedJobs: [{name, exitCode, excerpt}], traceTail }`,
     { label: `ci-check-${ciIter}`, phase: 'Build with convergence', schema: {
       type: 'object',
       properties: {

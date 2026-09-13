@@ -7,7 +7,9 @@ Two Skills-as-modules skills under the module key `bmad-orchestration`:
 | `/bmad-prd-orchestrate` | PRD meta-orchestrator: drives all stories across all epics with quality-gate convergence + CI + auto-merge |
 | `/bmad-build-converge` | Single-story build + convergence loop + CI-fix + auto-merge (sub-workflow of the orchestrator; usable standalone) |
 
-Both skills ship self-contained: the workflow `.js` plus the helper bash scripts (`write-state.sh`, `orchestrate-helper.sh`, `ci-monitor.sh`) live in each skill's `scripts/` folder. Claude Code's Workflow tool reads the JS and dispatches with the `script` parameter; helper paths are passed via `args.helpersDir` so the JS finds them at runtime regardless of install location.
+Both skills ship self-contained: the workflow `.js` plus the helper bash scripts (`write-state.sh`, `orchestrate-helper.sh`) live in each skill's `scripts/` folder. Claude Code's Workflow tool reads the JS and dispatches with the `script` parameter; helper paths are passed via `args.helpersDir` so the JS finds them at runtime regardless of install location.
+
+Neither skill calls a platform CLI or a tracker API directly. `glab`, `gh`, and the tracker/pipeline HTTP calls belong to the `bmad-issue-tracking` module, which owns that abstraction; this repo reaches them only through `Skill: bmad-issue-tracking-sync` or by executing one of the module's workflow atomics (its CI wait, its issue-comment atomic). A `test/integration.test.mjs` guard enforces it across both scripts and both `scripts/*.sh`.
 
 ## Install
 
@@ -57,8 +59,7 @@ bmad-orchestration/
     │   └── scripts/
     │       ├── bmad-prd-orchestrate.js
     │       ├── write-state.sh
-    │       ├── orchestrate-helper.sh
-    │       └── ci-monitor.sh
+    │       └── orchestrate-helper.sh
     └── bmad-build-converge/
         ├── SKILL.md
         ├── module-manifest.toml
@@ -66,8 +67,7 @@ bmad-orchestration/
         └── scripts/
             ├── bmad-build-converge.js
             ├── write-state.sh
-            ├── orchestrate-helper.sh
-            └── ci-monitor.sh
+            └── orchestrate-helper.sh
 ```
 
 ## Versioning
