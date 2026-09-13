@@ -595,6 +595,19 @@ STEPS:
    - Update last_updated to "${timestamp}"
    - git add + commit -m "chore(sprint-status): story <storyKey> → in-progress"
    - DO push this commit (so MR create phase has something to point at): \`git push origin \${storyBranch}\` (use --force-with-lease if local is ahead).
+7b. Declare that THIS caller handles CI, so the issue-tracking module's post-completion
+    chain does not repeat the wait inside every build dispatch:
+      printf 'ci handled by bmad-build-converge\n' > <worktreePath>/.bmad-ci-handled
+    Why: bmad-build-auto's terminal hook runs the module's post-dev-complete.yaml, which
+    waits for CI to go green and writes ci-status.json. Those steps exist for bmad-loop's
+    verify contract, which this orchestrator does not use — it polls the pipeline itself
+    (scripts/ci-monitor.sh) after the build converges, and the convergence loop
+    deliberately does NOT wait for CI between review iterations. The run traces measured
+    that hook wait at 47-305 s per build dispatch.
+    The module reads the marker and skips those steps; without it the behaviour is
+    unchanged, so this is safe for any consumer that does not create it.
+    The marker is UNTRACKED on purpose: do NOT git add it, do NOT commit it. It dies with
+    the worktree (cleanup removes the worktree at the end of this run).
 8. SYNC STORY ISSUE → in-progress on the issue tracker (soft-fail — a missing or
    unreadable issue must NOT block setup). One Skill invocation:
        BMAD_ISSUE_ACTION=set-status \\
