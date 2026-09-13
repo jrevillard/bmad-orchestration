@@ -19,9 +19,11 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_PATH = join(__dirname, '../scripts/bmad-prd-orchestrate.js');
@@ -155,5 +157,37 @@ test('integration: BOTH scripts end with top-level `return await main();` (not b
       `${label}: found bare 'await main();' — its return value is discarded. `
       + `Use 'return await main();'.`
     );
+  }
+});
+
+// ============================================================================
+// Both scripts must PARSE. This automates the manual gate CLAUDE.md documents:
+// strip the top-level `return await main();` (illegal in ESM) and node --check.
+//
+// The failure it prevents is the unescaped-backtick class: an agent prompt is a
+// template literal, so a raw backtick inside prompt text closes it early and the
+// parser dies on whatever follows with a misleading "missing ) after argument
+// list". It bit this project three times in one session, each time only caught by
+// remembering to run the check by hand.
+// ============================================================================
+
+test('both workflow scripts parse after stripping the top-level return', () => {
+  for (const [label, path] of [['orchestrator', ORCHESTRATOR_PATH], ['converge', CONVERGE_PATH]]) {
+    const src = readFileSync(path, 'utf8');
+    if (!/^return await main\(\);\s*$/m.test(src)) {
+      assert.fail(`${label}: cannot syntax-check — no top-level 'return await main();' to strip`);
+    }
+    const stripped = src.replace(/^return await main\(\);\s*$/m, 'await main();');
+    const tmp = join(tmpdir(), `bmad-syntax-${label}-${process.pid}.mjs`);
+    writeFileSync(tmp, stripped);
+    try {
+      execFileSync(process.execPath, ['--check', tmp], { stdio: 'pipe' });
+    } catch (e) {
+      const detail = (e.stderr && e.stderr.toString()) || e.message;
+      assert.fail(`${label}: script does not parse (a raw backtick inside an agent-prompt `
+        + `template literal is the usual cause):\n${detail}`);
+    } finally {
+      unlinkSync(tmp);
+    }
   }
 });

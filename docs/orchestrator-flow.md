@@ -101,7 +101,23 @@ sequenceDiagram
 2. **`isConverged()` accepts EITHER** `converged:true` OR `merge.merged:true`.
 3. **build-converge merge-check uses `git merge-base --is-ancestor`**, then
    case-insensitive check on stdout (`MERGED` / `merged`).
-4. **Each story's spec file lives in `_bmad-output/implementation-artifacts/stories/<key>.md`**.
+4. **The spec filename belongs to `bmad-build-auto` — consumers discover it, never
+   re-derive it.** `specPathCandidates()` encodes the ordered rule: sprint mode writes
+   `_bmad-output/implementation-artifacts/spec-<storyId>-*.md`; stories mode writes
+   `<spec_folder>/stories/<storyId>-*.md`; the legacy exact-key form is a last-resort
+   fallback. The slug comes from the story TITLE, so it differs from the story key
+   (`test_hello.py` → `test_hello-py`) — which is why matching is by story-id prefix
+   and why a re-derived name is a bug, not a shortcut. Two live failures came from
+   ignoring this: story 2-1's `review-finish` phase died on the invented
+   `stories/<key>.md` path, and one story ran under two identities
+   (`test_hello.py-…` in `state.json` vs `test_hello-py-…` in `sprint-status.yaml`).
+
+   **Known gap (upstream, not this repo):** Phase 4 passes
+   `--stories-dir …/implementation-artifacts/stories` to `sprint_plan.py`. That path
+   does not exist in sprint mode, and `sprint_plan.py:271` guards the whole block with
+   `is_dir()`, so its spec-existence → `ready-for-dev` upgrade is skipped **silently**.
+   Even if the directory existed, `:278` matches `f"{key}.md"`, not the producer's
+   `spec-<id>-<slug>.md`. Fixing it belongs upstream in `bmad-sprint-planning`.
 5. **Story issue lifecycle is owned by `bmad-build-converge`.** The setup agent
    sets `in-progress`; the merge agent (and the already-merged short-circuit)
    sets `done` + closes the issue. Standalone convergence therefore leaves the

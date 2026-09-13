@@ -17,8 +17,14 @@ const SCRIPT_PATH = join(__dirname, '../scripts/bmad-build-converge.js');
  * Extract a top-level `const NAME = (args) => { ... }` (arrow) or
  * `function NAME(args) { ... }` (declaration) from the script source. Throws
  * if not found.
+ *
+ * `deps` names sibling top-level functions the extracted one calls. Production
+ * code composes helpers (formatMRDescriptionPlaceholder → specPathCandidates →
+ * extractStoryId), and a bare vm context has none of them, so they are extracted
+ * too and injected as globals. Prefer this over inlining a rule into a function
+ * just to keep it extractable.
  */
-function extractFunction(source, name) {
+function extractFunction(source, name, deps = []) {
   const startRe = new RegExp(`(?:const\\s+${name}\\s*=|function\\s+${name})\\s*\\(`);
   const m = source.match(startRe);
   if (!m) throw new Error(`function ${name} not found in script source`);
@@ -40,7 +46,9 @@ function extractFunction(source, name) {
   }
   if (depth !== 0) throw new Error(`unbalanced braces in ${name}`);
   const body = source.slice(start, i);
-  return vm.runInNewContext(`(${body}\n)`, {}, { filename: `${name}.js` });
+  const ctx = {};
+  for (const dep of deps) ctx[dep] = extractFunction(source, dep);
+  return vm.runInNewContext(`(${body}\n)`, ctx, { filename: `${name}.js` });
 }
 
 const source = readFileSync(SCRIPT_PATH, 'utf8');
@@ -150,22 +158,80 @@ test('toRepoRelativePath uses repo root when worktree is empty', () => {
 // ============================================================================
 
 test('formatMRDescriptionPlaceholder has required structure', () => {
-  const fn = extractFunction(source, 'formatMRDescriptionPlaceholder');
+  const fn = extractFunction(source, 'formatMRDescriptionPlaceholder', ['extractStoryId', 'specPathCandidates']);
   const out = fn('1-3-login-form');
   // YAML frontmatter delimiters so platforms render it as a collapsible.
   assert.match(out, /^---\n/);
   assert.match(out, /\n---\n?$/);
-  // References story key + spec path so reviewers know where the real spec lives.
   assert.match(out, /Story 1-3-login-form/);
-  assert.match(out, /1-3-login-form\.md/);
-  assert.match(out, /_bmad-output\/implementation-artifacts\/stories/);
+  // Points at the file bmad-build-auto actually writes. Sprint mode names it
+  // spec-<storyId>-<slug>.md and the slug is the producer's to choose, so the
+  // placeholder must show the id-prefix form, never a re-derived full name.
+  assert.match(out, /_bmad-output\/implementation-artifacts\/spec-1-3-\*\.md/);
+  // The old invented convention must stay gone: that directory does not exist in
+  // sprint mode, which is why story 2-1's review-finish phase died on a missing file.
+  assert.doesNotMatch(out, /implementation-artifacts\/stories\//);
 });
 
 test('formatMRDescriptionPlaceholder handles kebab-suffix story keys', () => {
-  const fn = extractFunction(source, 'formatMRDescriptionPlaceholder');
+  const fn = extractFunction(source, 'formatMRDescriptionPlaceholder', ['extractStoryId', 'specPathCandidates']);
   const out = fn('3-4-automatic-department-routing');
   assert.match(out, /Story 3-4-automatic-department-routing/);
-  assert.match(out, /3-4-automatic-department-routing\.md/);
+  assert.match(out, /spec-3-4-\*\.md/);
+});
+
+// ============================================================================
+// extractStoryId / specPathCandidates / renderSpecDiscovery
+// The spec filename belongs to bmad-build-auto. These pin the rule that
+// consumers DISCOVER by story-id prefix instead of re-deriving the slug — two
+// slugifiers disagreeing on '.' produced two identities for one story
+// (test_hello.py-… in state.json vs test_hello-py-… in sprint-status.yaml).
+// ============================================================================
+
+test('extractStoryId takes the <epic>-<story> prefix', () => {
+  const fn = extractFunction(source, 'extractStoryId');
+  assert.equal(fn('1-3-login-form'), '1-3');
+  assert.equal(fn('4-1-a'), '4-1');
+  assert.equal(fn('2-11-some-long-slug'), '2-11');
+  assert.equal(fn('1'), '1');
+  assert.equal(fn(''), '');
+  assert.equal(fn(null), '');
+});
+
+test('specPathCandidates orders sprint mode, then stories mode, then legacy', () => {
+  const fn = extractFunction(source, 'specPathCandidates');
+  assert.deepEqual([...fn('1-5', '1-5-add-tests-test_hello-py-with-one-passing-test')], [
+    '_bmad-output/implementation-artifacts/spec-1-5-*.md',
+    '_bmad-output/implementation-artifacts/stories/1-5-*.md',
+    '_bmad-output/implementation-artifacts/1-5-add-tests-test_hello-py-with-one-passing-test.md',
+  ]);
+});
+
+test('specPathCandidates never re-derives the slug', () => {
+  const fn = extractFunction(source, 'specPathCandidates');
+  const fromKey = fn('1-5', '1-5-add-tests-test_hello-py-with-one-passing-test');
+  const fromDotKey = fn('1-5', '1-5-add-tests-test_hello.py-with-one-passing-test');
+  // Both id-prefix candidates are identical whatever the key says — that is what
+  // makes discovery immune to whichever slugifier won.
+  assert.equal(fromKey[0], fromDotKey[0]);
+  assert.equal(fromKey[1], fromDotKey[1]);
+  // Only the legacy exact-key fallback differs, and it is last, so a file written
+  // by the producer always wins over the legacy form.
+  assert.notEqual(fromKey[2], fromDotKey[2]);
+});
+
+test('specPathCandidates drops candidates it cannot build', () => {
+  const fn = extractFunction(source, 'specPathCandidates');
+  assert.deepEqual([...fn('', '')], []);
+  assert.deepEqual([...fn('', '1-5-x')], ['_bmad-output/implementation-artifacts/1-5-x.md']);
+});
+
+test('renderSpecDiscovery renders the same rule used for candidates', () => {
+  const fn = extractFunction(source, 'renderSpecDiscovery', ['extractStoryId', 'specPathCandidates']);
+  const out = fn('2-1-deferred-work-ledger-round-trip');
+  assert.match(out, /spec-2-1-\*\.md/);
+  assert.match(out, /stories\/2-1-\*\.md/);
+  assert.match(out, /2-1-deferred-work-ledger-round-trip\.md/);
 });
 
 // ============================================================================

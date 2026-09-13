@@ -35,6 +35,62 @@ function extractEpicKey(sk) {
   return (sk.split('-')[0]) || sk;
 }
 
+// extractStoryId(storyKey) → the "<epic>-<story>" prefix of a canonical key.
+// bmad-build-auto names the spec `spec-<storyId>-<slug>.md`, so the id prefix is
+// the only stable part of that name: the slug comes from the story title and WILL
+// differ from the key (test_hello.py → test_hello-py — two identities for one
+// story in a live run).
+// Pure, self-contained (the vm test harness extracts it in isolation).
+function extractStoryId(storyKey) {
+  const parts = String(storyKey || '').split('-');
+  if (parts.length >= 2 && parts[0] && parts[1]) return `${parts[0]}-${parts[1]}`;
+  return parts[0] || '';
+}
+
+// specPathCandidates(storyId, storyKey) → ordered relative path patterns.
+// bmad-build-auto owns the spec filename (BMAD-METHOD step-01-clarify-and-route):
+//   sprint mode  → {implementation_artifacts}/spec-{slug}.md
+//   stories mode → {spec_folder}/stories/{story_id}-{slug}.md
+// Discover by prefix; never re-derive the slug.
+// Duplicated in bmad-build-converge.js on purpose — Workflow-tool scripts cannot
+// import each other, and both must render the SAME rule into their prompts.
+function specPathCandidates(storyId, storyKey) {
+  const base = '_bmad-output/implementation-artifacts';
+  const out = [];
+  if (storyId) {
+    out.push(`${base}/spec-${storyId}-*.md`);       // sprint mode
+    out.push(`${base}/stories/${storyId}-*.md`);    // stories mode
+  }
+  if (storyKey) out.push(`${base}/${storyKey}.md`); // legacy: exact-key, no prefix
+  return out;
+}
+
+// renderSpecDiscovery(storyKey) → the discovery block rendered into agent prompts,
+// generated from specPathCandidates so prompt and rule cannot drift.
+function renderSpecDiscovery(storyKey) {
+  return specPathCandidates(extractStoryId(storyKey), storyKey)
+    .map(p => `     ${p}`).join('\n');
+}
+
+// renderSpecPatterns() → the id-prefix patterns with a literal <storyId> token, for
+// prompts that iterate over MANY stories (the plan agent) rather than resolving one.
+// Built from the same specPathCandidates, so the rule still has one source.
+function renderSpecPatterns() {
+  return specPathCandidates('<storyId>', '').map(p => `     ${p}`).join('\n');
+}
+
+// findUnknownStoryKeys(keys, known) → keys with no counterpart in `known`.
+// A key persisted to state.json that the plan (built from sprint-status.yaml)
+// never produced means the SAME story exists under two identities — the failure
+// that put `test_hello.py-…` in state.json while everything else said
+// `test_hello-py-…`. Returning them lets the caller halt with a diagnostic instead
+// of dispatching a story under a name nothing else recognises.
+// Pure: filter + Set, no side effects. Unit-tested (test/pure.test.mjs).
+function findUnknownStoryKeys(keys, known) {
+  const knownSet = new Set(known || []);
+  return (keys || []).filter(k => k && !knownSet.has(k));
+}
+
 // base64Encode(input) → string
 // Pure-JS UTF-8 → base64 encoder (Workflow runtime lacks `Buffer` + `btoa`).
 // Used by writeState's bash command to safely embed state/deps JSON in a
@@ -211,6 +267,10 @@ function userOptionsForHaltReason(reason) {
     // State could not be persisted — the run stopped rather than proceed on state
     // that is not on disk. 'continue' retries the write.
     state_write_failed:   ['continue', 'abort_prd'],
+    // state.json held a story key the plan never produced (two identities for one
+    // story). 'continue' re-runs the load + validation, so it only helps once the
+    // operator has fixed the key on disk.
+    state_key_rejected:   ['continue', 'abort_prd'],
   };
   return byReason[reason] || ['continue', 'retry_blocked', 'skip_blocked', 'abort_prd', 'fix_then_resume'];
 }
@@ -463,7 +523,15 @@ STEPS:
      - First story (index 0) seeds as {story, depends_on: []}.
    This default chain ensures stories execute in order unless overridden.
 5. If inferDeps AND NOT noInfer:
-   a. For each story in storyQueue, read spec at <prdWorktreePath>/_bmad-output/implementation-artifacts/stories/<canonicalKey>.md
+   a. For each story in storyQueue, DISCOVER its spec — never build the filename from
+      the key. bmad-build-auto chooses the name, and its slug comes from the story
+      title, so it differs from the key (test_hello.py → test_hello-py). Paths are
+      relative to <prdWorktreePath>; first hit wins:
+${renderSpecPatterns()}
+      Replace <storyId> with the story key's first two dash-separated segments
+      (2-1-deferred-work-ledger-round-trip → 2-1). Two matches in one pattern →
+      HALT with the candidates listed. No match → the story simply has no spec yet:
+      skip its depends_on extraction, do NOT invent a path, do NOT fail the plan.
    b. Extract depends_on from spec frontmatter if present.
    c. If absent, scan spec body for story key mentions (regex: /\\b\\d+-\\d+[a-z]?\\b/g) and "depends on story X" phrasing.
    d. Apply overrides: for each story, merge frontmatter depends_on over the seed (override = union, seed entries stay if not overridden). Use CANONICAL keys throughout (both story and depends_on fields).
@@ -813,6 +881,32 @@ if (resume) {
       state = { ...state, ...loaded };
       // Defensive: ensure all collection fields stay arrays (disk state may be missing fields)
       state = normalizeStateArrays(state);
+      // Validate every key that came back from disk against the keys the plan
+      // produced from sprint-status.yaml. An unknown key means the SAME story has
+      // two identities — a title-derived slug instead of the sprint key — and
+      // dispatching it would run a story nothing else recognises. Halt loudly:
+      // verified live, state.json carried `test_hello.py-…` while sprint-status,
+      // deps.json and the journal all carried `test_hello-py-…`.
+      const knownKeys = [
+        ...(planResult.storyQueue || []), ...(planResult.completed || []),
+        ...(planResult.blocked || []), ...(planResult.skipped || []),
+        ...(planResult.awaitingOperator || []),
+        ...((planResult.inferred || []).map(e => e && e.story).filter(Boolean)),
+      ];
+      const loadedKeys = [
+        ...state.storyQueue, ...state.completed, ...state.blocked,
+        ...state.skipped, ...state.awaitingOperator,
+      ];
+      const unknownKeys = findUnknownStoryKeys(loadedKeys, knownKeys);
+      if (unknownKeys.length > 0) {
+        log(`HALT: state.json holds ${unknownKeys.length} story key(s) the plan never produced: ${unknownKeys.join(', ')}`)
+        await appendJournal({ event: 'state_key_rejected', unknown: unknownKeys, knownCount: knownKeys.length });
+        return buildHaltContext('state_key_rejected', {
+          unknownKeys,
+          knownKeysSample: knownKeys.slice(0, 20),
+          hint: 'An unknown key means one story has two identities — usually a title-derived slug (spec-*.md naming) where sprint-status.yaml has the canonical key. Diff state.json against sprint-status.yaml, fix the key, then resume.',
+        }, timestamp, runDir, ['continue', 'abort_prd']);
+      }
       log(`Resumed from ${resume}: queueSize=${state.storyQueue.length} completed=${state.completed.length} blocked=${state.blocked.length} iterationCount=${state.iterationCount}`)
     } else {
       log(`WARNING: resume=${resume} but loadState returned no usable data; proceeding with fresh state`)
@@ -1315,6 +1409,12 @@ STEPS:
      --epic-file <EPIC_FILE> \\
      --status-file ${setup.sprintStatusPath} \\
      --stories-dir ${setup.prdWorktreePath}/_bmad-output/implementation-artifacts/stories \\
+     (KNOWN GAP: that directory does not exist in sprint mode, and sprint_plan.py:271
+      guards its scan with is_dir(), so the spec-existence -> ready-for-dev upgrade is
+      skipped SILENTLY. Even if it existed, sprint_plan.py:278 matches f"{key}.md",
+      not the producer's spec-<id>-<slug>.md. Fixing it belongs upstream in
+      bmad-sprint-planning — do NOT "fix" it here by pointing at another directory,
+      the filename match would still miss.) \\
      --project "<project_name>" \\
      --date "${timestamp}" \\
      <all --set flags>

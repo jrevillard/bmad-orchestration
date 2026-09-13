@@ -26,7 +26,7 @@ const SCRIPT_PATH = join(__dirname, '../scripts/bmad-prd-orchestrate.js');
  * and braces inside template literals / strings / regexes (good-enough heuristic
  * for our small pure functions — no nested braces in current extractors).
  */
-function extractFunction(source, name) {
+function extractFunction(source, name, deps = []) {
   // Match either `const NAME = (` (arrow/value) or `function NAME(` (declaration).
   // Function declarations don't have `=`, so the regex alternates both forms.
   const startRe = new RegExp(`(?:const\\s+${name}\\s*=|function\\s+${name})\\s*\\(`);
@@ -69,7 +69,14 @@ function extractFunction(source, name) {
   }
   if (depth !== 0) throw new Error(`unbalanced braces in ${name}`);
   const body = source.slice(start, i);
-  return vm.runInNewContext(`(${body}\n)`, {}, { filename: `${name}.js` });
+  // `deps` names sibling top-level functions the extracted one calls. Production
+  // code composes helpers (renderSpecDiscovery → specPathCandidates →
+  // extractStoryId) and a bare vm context has none of them, so extract them too
+  // and inject as globals. Prefer this over inlining a rule just to stay
+  // extractable — the same option exists in the converge suite's harness.
+  const ctx = {};
+  for (const dep of deps) ctx[dep] = extractFunction(source, dep);
+  return vm.runInNewContext(`(${body}\n)`, ctx, { filename: `${name}.js` });
 }
 
 const source = readFileSync(SCRIPT_PATH, 'utf8');
@@ -981,4 +988,67 @@ test('normalizeStateArrays replaces non-array values, not just missing ones', ()
   const fn = extractFunction(SCRIPT_SOURCE, 'normalizeStateArrays');
   const out = fn({ skipped: null, awaitingOperator: 'nope', blocked: 'also wrong' });
   assert.ok(Array.isArray(out.skipped) && Array.isArray(out.awaitingOperator) && Array.isArray(out.blocked));
+});
+
+// ============================================================================
+// Spec discovery + story-key validation
+// ============================================================================
+
+test('extractStoryId takes the <epic>-<story> prefix', () => {
+  const fn = extractFunction(SCRIPT_SOURCE, 'extractStoryId');
+  assert.equal(fn('1-3-login-form'), '1-3');
+  assert.equal(fn('2-11-long-slug'), '2-11');
+  assert.equal(fn('4-1-a'), '4-1');
+  assert.equal(fn('1'), '1');
+  assert.equal(fn(''), '');
+  assert.equal(fn(null), '');
+});
+
+test('specPathCandidates orders sprint mode, then stories mode, then legacy', () => {
+  const fn = extractFunction(SCRIPT_SOURCE, 'specPathCandidates');
+  assert.deepEqual([...fn('2-1', '2-1-deferred-work-ledger-round-trip')], [
+    '_bmad-output/implementation-artifacts/spec-2-1-*.md',
+    '_bmad-output/implementation-artifacts/stories/2-1-*.md',
+    '_bmad-output/implementation-artifacts/2-1-deferred-work-ledger-round-trip.md',
+  ]);
+});
+
+test('renderSpecPatterns emits the id-prefix patterns for many-story prompts', () => {
+  const fn = extractFunction(SCRIPT_SOURCE, 'renderSpecPatterns', ['specPathCandidates']);
+  const out = fn();
+  assert.match(out, /spec-<storyId>-\*\.md/);
+  assert.match(out, /stories\/<storyId>-\*\.md/);
+  // No legacy exact-key candidate here: there is no single key to name.
+  assert.doesNotMatch(out, /implementation-artifacts\/<storyId>\.md/);
+});
+
+test('renderSpecDiscovery resolves one story key', () => {
+  const fn = extractFunction(SCRIPT_SOURCE, 'renderSpecDiscovery', ['extractStoryId', 'specPathCandidates']);
+  const out = fn('2-1-deferred-work-ledger-round-trip');
+  assert.match(out, /spec-2-1-\*\.md/);
+  assert.match(out, /stories\/2-1-\*\.md/);
+  assert.match(out, /2-1-deferred-work-ledger-round-trip\.md/);
+});
+
+test('findUnknownStoryKeys returns keys the plan never produced', () => {
+  const fn = extractFunction(SCRIPT_SOURCE, 'findUnknownStoryKeys');
+  const known = ['1-1-a', '1-2-b'];
+  assert.deepEqual([...fn(['1-1-a', '9-9-ghost'], known)], ['9-9-ghost']);
+  assert.deepEqual([...fn([], known)], []);
+  assert.deepEqual([...fn(null, known)], []);
+  // An empty known-set means nothing can be verified — report everything rather
+  // than silently accepting it.
+  assert.deepEqual([...fn(['1-1-a'], null)], ['1-1-a']);
+  // Falsy entries are absent slots, not unknown keys.
+  assert.deepEqual([...fn(['', null, '1-1-a'], known)], []);
+});
+
+test('findUnknownStoryKeys catches the two-identities case', () => {
+  // The live failure this guards: state.json held a title-derived slug
+  // (dot kept) while the plan, built from sprint-status.yaml, produced the
+  // canonical key (dot rendered as a dash).
+  const fn = extractFunction(SCRIPT_SOURCE, 'findUnknownStoryKeys');
+  const known = ['1-5-add-tests-test_hello-py-with-one-passing-test'];
+  const fromDisk = ['1-5-add-tests-test_hello.py-with-one-passing-test'];
+  assert.deepEqual([...fn(fromDisk, known)], fromDisk);
 });
