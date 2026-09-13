@@ -146,25 +146,36 @@ the offending key rather than dispatching a name nothing else recognises.
 - The pure-function tests must feed **object-form** `blocked`/`skipped` entries. Feeding
   strings only is how the Critical above passed CI.
 
-## Interference from the module's `on_complete` hook (measured, unresolved)
+## Interference from the module's `on_complete` hook — and the marker that fixes it
 
 `bmad-build-auto`'s terminal hook runs the `bmad-issue-tracking` module's
 `post-build-dispatch.yaml` → `post-dev-complete.yaml`, which pushes, waits for CI, writes
 `ci-status.json`, updates the issue and ensures the MR. **Inside every build dispatch.**
 That duplicates our own MR/CI/issue work, and worse, it re-introduces the CI wait the
-convergence loop deliberately removed (`bmad-build-converge.js` PHASE A: "NO CI WAIT …
-saves ~3-5min per iter"). Measured from the run traces: **47 s, 55 s, 305 s** of CI
-waiting inside three 2-1 build dispatches, and 151 s in a successful 1-4 dispatch —
-against 52-83 s for converge's own `ci-check`.
+convergence loop deliberately removed (PHASE A: "NO CI WAIT … saves ~3-5min per iter").
+Measured from the run traces: **47 s, 55 s, 305 s** of CI waiting inside three 2-1 build
+dispatches, and 151 s in a successful 1-4 dispatch — against 52-83 s for converge's own
+`ci-check`.
 
-**Do not try to signal it away with an environment variable.** That was tried and
-reverted: the module's own suite forbids raw shell variables in workflow steps
-(`tests/test_command_patterns.py::test_no_unresolved_shell_vars` — only `NF` is allowed),
-so no `$VAR`/`${VAR}` channel exists, and its `test_variable_flow.py` separator rule
-additionally flags a `${X:-default}` colon as a hardcoded label separator. There is also
-no way to distinguish our calls from bmad-loop's at that level: both drive the same
-`bmad-build-auto`. Removing the hook's steps would break bmad-loop, whose `[verify]`
-command requires the `ci-status.json` only the hook writes
-(`skills/bmad-issue-tracking-setup/scripts/bmad-loop/ci-gate/ci-status.sh:32`).
+**The channel is a FILE, not an environment variable.** The setup agent writes
+`<worktreePath>/.bmad-ci-handled` (prompt step 7b); `post-dev-complete` reads
+`{worktree}/.bmad-ci-handled` and skips its two CI blocks when it is non-empty. Absent
+marker → empty → the blocks run, so bmad-loop and every other consumer are unchanged.
 
-Current position: **accept the cost**. It buys wall-clock, not correctness.
+- **Never retry the env-var route.** `BMAD_SKIP_CI_WAIT` was written and reverted: the
+  module's suite forbids any shell variable in a step
+  (`tests/test_command_patterns.py::test_no_unresolved_shell_vars`, only awk's `NF` is
+  allowed), and its separator rule additionally flags a `${X:-default}` colon. The
+  workflow language simply has no env channel.
+- **The marker must stay untracked.** It is not gitignored; the module already expects
+  orchestrator-owned untracked files in the worktree (its hook comment names
+  sprint-status.yaml and deferred-work.md). Never `git add` it, and never commit it — it
+  exists only for the lifetime of the worktree, which cleanup removes.
+- **`cwd` is what makes it visible**: both build dispatches pass
+  `cwd: setup.worktreePath` and `dispatchViaClaudeP` `cd`s into it, so the hook's `pwd`
+  (the module's `{worktree}`) is that same directory.
+- Removing the hook's steps instead is not an option: they are the module's product for
+  bmad-loop, whose `[verify]` command fails without the `ci-status.json` they write
+  (`skills/bmad-issue-tracking-setup/scripts/bmad-loop/ci-gate/ci-status.sh:32`), and
+  nothing at that level distinguishes our calls from bmad-loop's — both drive the same
+  `bmad-build-auto`.
