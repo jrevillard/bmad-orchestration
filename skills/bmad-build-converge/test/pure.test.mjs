@@ -188,6 +188,35 @@ test('formatMRDescriptionPlaceholder handles kebab-suffix story keys', () => {
 // (test_hello.py-… in state.json vs test_hello-py-… in sprint-status.yaml).
 // ============================================================================
 
+test('guard: the issue-comment step keeps the module\'s extraction rule', () => {
+  // The rule is a deliberate duplicate of the Python in the module's
+  // common/post-dev-complete.yaml, so this pins its three properties. Losing any one of
+  // them makes converge post the template's own text, or silently post nothing:
+  //   - BOTH headings: '## Review Triage Log' (bmad-build-auto) and '### Review Findings'
+  //     (bmad-code-review) — naming only one drops half the producers.
+  //   - the HTML-comment strip, which is what makes "unrun review" distinguishable from
+  //     "clean review"; without it the template's explanatory comment reads as content.
+  //   - posting through the module's atomic, never a raw glab/gh call, so platform logic
+  //     stays in the module.
+  assert.match(source, /postStoryIssueComment/);
+  assert.match(source, /## Review Triage Log/);
+  assert.match(source, /### Review Findings/);
+  assert.match(source, /Strip HTML comments/);
+  assert.match(source, /common\/post-issue-comment\.yaml/);
+  const fn = source.match(/async function postStoryIssueComment[\s\S]*?\n\}/);
+  assert.ok(fn, 'postStoryIssueComment not found');
+  assert.doesNotMatch(fn[0], /\bglab\b|\bgh issue comment\b/,
+    'the comment must go through the module atomic, not a raw platform call');
+});
+
+test('guard: the issue-comment result reaches the returned merge object', () => {
+  // The orchestrator reads convergeResult.merge.*; a field that is computed but not
+  // returned is invisible, which is how the story-issue sync was lost once already.
+  const returns = source.match(/merge: \{ merged: mergeResult\.merged[\s\S]*?\},/);
+  assert.ok(returns, 'final merge object not found');
+  assert.match(returns[0], /issueCommented: mergeResult\.issueCommented/);
+});
+
 test('extractStoryId takes the <epic>-<story> prefix', () => {
   const fn = extractFunction(source, 'extractStoryId');
   assert.equal(fn('1-3-login-form'), '1-3');

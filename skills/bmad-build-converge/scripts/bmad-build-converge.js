@@ -268,6 +268,91 @@ function renderSpecDiscovery(storyKey) {
     .map(p => `     ${p}`).join('\n');
 }
 
+// postStoryIssueComment(setup) → boolean
+// Post ONE comment on the story issue carrying the implementation summary and the review
+// findings, both read from the spec.
+//
+// This exists because converge now owns the story's tracker surface end to end. The
+// module's post-completion chain used to post these two comments, and bmad-build-auto's
+// hook does nothing under converge any more (the caller marker in
+// <worktree>/.bmad-ci-handled). Without this step the findings would only ever live in the
+// spec, never on the issue.
+//
+// One comment with two labelled sections rather than the hook's two separate ones: same
+// content, one dispatch, one failure mode.
+//
+// The extraction rule is a DELIBERATE duplicate of the Python in the module's
+// common/post-dev-complete.yaml (both headings, HTML comments stripped, empty means post
+// nothing) — the module's workflow files cannot be imported, the same reason base64Encode
+// and describeSchema are duplicated here. If that rule changes there, change it here.
+//
+// Posting goes through the module's own atomic, executed the way its hooks execute it
+// (read the workflow-lang spec, run the file IN FULL), so no platform logic lands in JS.
+//
+// Soft-fail throughout: a missing issue or a failed post must never affect the merge.
+async function postStoryIssueComment(setup) {
+  try {
+    const res = await agent(
+      `Post ONE comment on the story issue for ${setup.storyKey}, carrying the story's
+implementation summary and its review findings, both taken from the spec.
+
+WORKTREE: ${setup.worktreePath}
+SPEC_PATH: ${setup.specPath}
+PRD_KEY: ${setup.prdKey}
+
+STEPS:
+1. Read the spec at SPEC_PATH. If it does not exist, STOP and return posted=false — the
+   caller stays silent rather than reporting a post that never happened.
+2. Extract the REVIEW section: the heading '## Review Triage Log' (written by
+   bmad-build-auto) or '### Review Findings' (written by bmad-code-review), whichever is
+   present, running until the next line starting with '## '. Strip HTML comments
+   (<!-- ... -->) BEFORE deciding whether anything is left: the spec template ships an
+   explanatory comment under the heading, so an unrun review would otherwise look
+   non-empty. Empty after stripping → no review content.
+3. Extract the IMPLEMENTATION SUMMARY from the spec's '## Auto Run Result' section if it has
+   one (patches applied, items deferred, score) — two or three lines, no invention. Absent
+   section → no summary.
+4. If BOTH are empty, STOP and return posted=false. Do NOT post a placeholder.
+5. Write the comment body to /tmp/bmad-story-comment-${setup.storyKey}.md, markdown:
+     ## Implementation summary
+     <summary, or omit this section when empty>
+     ## Review findings
+     <findings, or omit this section when empty>
+6. Resolve the issue: run the Skill once to find it —
+     BMAD_ISSUE_ACTION=find \\
+     BMAD_ISSUE_KEY="${setup.storyKey}" \\
+     BMAD_ISSUE_PRD_KEY="${setup.prdKey}" \\
+         Skill: bmad-issue-tracking-sync
+   Capture { issue_id }. If it is empty, STOP and return posted=false (soft-fail).
+7. Post it by executing the module's own atomics — do NOT invoke the platform CLI
+   directly, the atomic does that:
+   a. Read ${setup.worktreePath}/_bmad/_config/custom/bmad-workflow-lang.md for the workflow
+      language specification.
+   b. Execute ${setup.worktreePath}/_bmad/_config/custom/workflows/common/check-config.yaml
+      IN FULL — it populates host, project and project_enc.
+   c. Execute ${setup.worktreePath}/_bmad/_config/custom/workflows/common/post-issue-comment.yaml
+      IN FULL, with issue_id and comment_file=/tmp/bmad-story-comment-${setup.storyKey}.md
+      in scope.
+   If the module's files are not present under WORKTREE, skip the post, log why, and return
+   posted=false — do not fall back to a raw platform call.
+8. rm -f /tmp/bmad-story-comment-${setup.storyKey}.md
+9. Return JSON { posted: <bool>, reason: "<short why when false>" }.
+
+Soft-fail by design: nothing here may halt the run or change the merge outcome.`,
+      { label: `issue-comment-${setup.storyKey}`, phase: 'Auto-merge',
+        schema: { type: 'object', properties: { posted: { type: 'boolean' }, reason: { type: 'string' } }, required: ['posted'] },
+        agentType: 'general-purpose',
+        // Skill to resolve the issue, Read for the spec and the module's workflow files,
+        // Bash for the temp file. No Write/Edit: the spec is never modified.
+        allowedTools: ['Read', 'Bash', 'Skill'] }
+    );
+    return !!(res && res.posted === true);
+  } catch (e) {
+    log(`Story issue comment failed for ${setup.storyKey}: ${e} — continuing (soft-fail)`)
+    return false;
+  }
+}
+
 // formatMRDescriptionPlaceholder(storyKey) → string
 // Placeholder body for the MR description file when the spec doesn't exist at
 // MR-create time (normal case — bmad-build-auto creates the spec during Build).
@@ -857,6 +942,9 @@ if (mergeCheckCmd) {
     // tracker issue must not stay stuck at in-progress. Same dedicated dispatch
     // as the normal path — see syncStoryIssueDone().
     const alreadyMergedIssueSynced = await syncStoryIssueDone(setup, 'Auto-merge');
+    // The story is done here too, so its issue gets the same summary + findings comment.
+    const alreadyMergedCommented = await postStoryIssueComment(setup);
+    log(`Story issue comment: ${alreadyMergedCommented ? 'posted' : 'nothing to post (soft-fail)'}`)
     return {
       storyKey: setup.storyKey,
       converged: true,
@@ -866,7 +954,7 @@ if (mergeCheckCmd) {
       setup,
       mr: { mrIid: null, mrUrl: null, pipelineId: null, alreadyMerged: true },
       monitor: { status: 'success', retries: 0, transient: false, failedJobs: [] },
-      merge: { merged: true, sprintStatusDone: false, issueStatusSynced: alreadyMergedIssueSynced, error: null, alreadyMerged: true },
+      merge: { merged: true, sprintStatusDone: false, issueStatusSynced: alreadyMergedIssueSynced, issueCommented: alreadyMergedCommented, error: null, alreadyMerged: true },
       cleanup: { worktrees: [], branches: [], keptWorktrees: [], keptBranches: [], prunedRefs: 0, removedLogs: [], errors: [] },
     }
   }
@@ -1276,6 +1364,13 @@ mergeResult.issueStatusSynced = mergeResult.merged
   ? await syncStoryIssueDone(setup, 'Auto-merge')
   : false;
 
+// Story tracker surface, part two: the content. Same condition as the status sync — only a
+// real merge means the story is done. Soft-fail, never affects the merge result.
+mergeResult.issueCommented = mergeResult.merged
+  ? await postStoryIssueComment(setup)
+  : false;
+log(`Story issue comment: ${mergeResult.issueCommented ? 'posted' : 'nothing to post'}`)
+
 log(`Merge: ${mergeResult.merged ? 'OK' : 'SKIPPED'} | Sprint-status: ${mergeResult.sprintStatusDone ? 'done' : 'pending'} | Story issue: ${mergeResult.issueStatusSynced ? 'done+closed' : 'NOT synced'}`)
 
 // ============================================================================
@@ -1341,7 +1436,7 @@ return {
   },
   mr: { mrIid: mrResult.mrIid, mrUrl: mrResult.mrUrl, pipelineId: mrResult.pipelineId },
   monitor: { status: lastCIStatus, retries: iteration > 1 ? iteration - 1 : 0, transient: false, failedJobs: ciFailure?.failedJobs || [] },
-  merge: { merged: mergeResult.merged, sprintStatusDone: mergeResult.sprintStatusDone, issueStatusSynced: mergeResult.issueStatusSynced, error: mergeResult.error },
+  merge: { merged: mergeResult.merged, sprintStatusDone: mergeResult.sprintStatusDone, issueStatusSynced: mergeResult.issueStatusSynced, issueCommented: mergeResult.issueCommented, error: mergeResult.error },
   cleanup: { worktrees: cleanup.removedWorktrees, branches: cleanup.deletedBranches, errors: cleanup.errors },
 }
 

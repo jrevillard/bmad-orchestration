@@ -181,3 +181,27 @@ other consumer are unchanged.
   (`skills/bmad-issue-tracking-setup/scripts/bmad-loop/ci-gate/ci-status.sh:32`), and
   nothing at that level distinguishes our calls from bmad-loop's — both drive the same
   `bmad-build-auto`.
+
+## Tracker ownership: converge owns stories, orchestrate owns epics
+
+Because the hook does nothing under converge, converge carries the whole story surface on
+the tracker. Verified inventory of what each script does:
+
+| | converge | orchestrator |
+|---|---|---|
+| status | `in-progress` at setup, `done` + close at merge (`syncStoryIssueDone`) | epic `in-progress` at the boundary, epic `done` + close in Phase 4 |
+| comments | `postStoryIssueComment` — one comment with the implementation summary and the review findings, read from the spec | — |
+| create / describe | nothing: issues exist already, created by the module's `sync-issues.yaml` via the sprint-planning/sprint-status hooks | same |
+
+- **`status:review` is a documented non-goal.** The hook set it; converge never did and
+  cannot: converge drives a story to `done`, so no path reaches `in-review`. Not a gap to
+  close unless a review park is ever introduced.
+- **`postStoryIssueComment` reimplements the module's extraction rule** (`## Review Triage
+  Log` *or* `### Review Findings`, HTML comments stripped before the emptiness test) —
+  a deliberate duplicate, because the module's workflow files cannot be imported. Ported
+  from `common/post-dev-complete.yaml`'s embedded Python; if that rule changes there, change
+  it here. Pinned by a `guard:` test that also forbids a raw platform call — the post goes
+  through the module's own `post-issue-comment.yaml`, executed the way its hooks execute it.
+- Both tracker steps are **soft-fail** and only run for a real merge (or the already-merged
+  short-circuit): a missing issue or a failed post never changes the merge outcome. Their
+  results surface in `convergeResult.merge` as `issueStatusSynced` and `issueCommented`.
