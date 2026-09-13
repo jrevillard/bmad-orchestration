@@ -164,10 +164,10 @@ test('formatMRDescriptionPlaceholder has required structure', () => {
   assert.match(out, /^---\n/);
   assert.match(out, /\n---\n?$/);
   assert.match(out, /Story 1-3-login-form/);
-  // Points at the file bmad-build-auto actually writes. Sprint mode names it
-  // spec-<storyId>-<slug>.md and the slug is the producer's to choose, so the
-  // placeholder must show the id-prefix form, never a re-derived full name.
-  assert.match(out, /_bmad-output\/implementation-artifacts\/spec-1-3-\*\.md/);
+  // Points at the file bmad-build-auto writes: sprint mode names it
+  // spec-<slug>.md where the slug comes from the title via sprint_plan's _slug, so
+  // it equals the key in the normal case — the first candidate is that exact name.
+  assert.match(out, /_bmad-output\/implementation-artifacts\/spec-1-3-login-form\.md/);
   // The old invented convention must stay gone: that directory does not exist in
   // sprint mode, which is why story 2-1's review-finish phase died on a missing file.
   assert.doesNotMatch(out, /implementation-artifacts\/stories\//);
@@ -177,7 +177,7 @@ test('formatMRDescriptionPlaceholder handles kebab-suffix story keys', () => {
   const fn = extractFunction(source, 'formatMRDescriptionPlaceholder', ['extractStoryId', 'specPathCandidates']);
   const out = fn('3-4-automatic-department-routing');
   assert.match(out, /Story 3-4-automatic-department-routing/);
-  assert.match(out, /spec-3-4-\*\.md/);
+  assert.match(out, /spec-3-4-automatic-department-routing\.md/);
 });
 
 // ============================================================================
@@ -198,32 +198,50 @@ test('extractStoryId takes the <epic>-<story> prefix', () => {
   assert.equal(fn(null), '');
 });
 
-test('specPathCandidates orders sprint mode, then stories mode, then legacy', () => {
+test('specPathCandidates orders exact, then sprint, then stories, then legacy', () => {
   const fn = extractFunction(source, 'specPathCandidates');
   assert.deepEqual([...fn('1-5', '1-5-add-tests-test_hello-py-with-one-passing-test')], [
+    '_bmad-output/implementation-artifacts/spec-1-5-add-tests-test_hello-py-with-one-passing-test.md',
     '_bmad-output/implementation-artifacts/spec-1-5-*.md',
     '_bmad-output/implementation-artifacts/stories/1-5-*.md',
     '_bmad-output/implementation-artifacts/1-5-add-tests-test_hello-py-with-one-passing-test.md',
   ]);
 });
 
-test('specPathCandidates never re-derives the slug', () => {
+test('specPathCandidates puts the exact name ahead of the id-prefix glob', () => {
+  // A story can have SIBLING spec files: `spec-1-5-…-blocked-attempt.md` is left
+  // behind by an intent-gap escalation, which makes the prefix glob ambiguous for a
+  // story that is perfectly fine. The exact candidate resolves it first, so the
+  // ambiguity HALT never fires on that case.
+  const fn = extractFunction(source, 'specPathCandidates');
+  const c = fn('1-5', '1-5-add-tests-test_hello-py-with-one-passing-test');
+  assert.equal(c[0], '_bmad-output/implementation-artifacts/spec-1-5-add-tests-test_hello-py-with-one-passing-test.md');
+  assert.match(c[1], /\*\.md$/, 'the glob must come after the exact candidate');
+});
+
+test('specPathCandidates keeps the id-prefix forms identical whatever the key says', () => {
   const fn = extractFunction(source, 'specPathCandidates');
   const fromKey = fn('1-5', '1-5-add-tests-test_hello-py-with-one-passing-test');
   const fromDotKey = fn('1-5', '1-5-add-tests-test_hello.py-with-one-passing-test');
-  // Both id-prefix candidates are identical whatever the key says — that is what
-  // makes discovery immune to whichever slugifier won.
-  assert.equal(fromKey[0], fromDotKey[0]);
+  // The id-prefix candidates do not depend on the key's slug at all — that is what
+  // makes discovery immune to whichever slugifier won. Only the two exact-key forms
+  // differ, and they are the first and last candidates, so a producer-written file
+  // still wins over the legacy form.
   assert.equal(fromKey[1], fromDotKey[1]);
-  // Only the legacy exact-key fallback differs, and it is last, so a file written
-  // by the producer always wins over the legacy form.
-  assert.notEqual(fromKey[2], fromDotKey[2]);
+  assert.equal(fromKey[2], fromDotKey[2]);
+  assert.notEqual(fromKey[0], fromDotKey[0]);
+  assert.notEqual(fromKey[3], fromDotKey[3]);
 });
 
 test('specPathCandidates drops candidates it cannot build', () => {
   const fn = extractFunction(source, 'specPathCandidates');
   assert.deepEqual([...fn('', '')], []);
-  assert.deepEqual([...fn('', '1-5-x')], ['_bmad-output/implementation-artifacts/1-5-x.md']);
+  // A key but no id: the exact and legacy forms are still derivable, the two
+  // id-prefix globs are not.
+  assert.deepEqual([...fn('', '1-5-x')], [
+    '_bmad-output/implementation-artifacts/spec-1-5-x.md',
+    '_bmad-output/implementation-artifacts/1-5-x.md',
+  ]);
 });
 
 test('renderSpecDiscovery renders the same rule used for candidates', () => {

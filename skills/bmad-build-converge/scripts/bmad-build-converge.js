@@ -246,11 +246,18 @@ function extractStoryId(storyKey) {
 function specPathCandidates(storyId, storyKey) {
   const base = '_bmad-output/implementation-artifacts';
   const out = [];
+  // EXACT first. In sprint mode the filename's slug comes from the story TITLE via
+  // sprint_plan's _slug (`[^\w]+ -> -`, underscore preserved), so it equals the
+  // sprint-status key whenever the key was derived from the same title — which is
+  // the normal case. Exact matching matters beyond tidiness: a story can have
+  // SIBLING spec files (`...-blocked-attempt.md` from an intent-gap escalation), so
+  // the prefix glob alone is ambiguous and would halt on a story that is fine.
+  if (storyKey) out.push(`${base}/spec-${storyKey}.md`);
   if (storyId) {
     out.push(`${base}/spec-${storyId}-*.md`);       // sprint mode
     out.push(`${base}/stories/${storyId}-*.md`);    // stories mode
   }
-  if (storyKey) out.push(`${base}/${storyKey}.md`); // legacy: exact-key, no prefix
+  if (storyKey) out.push(`${base}/${storyKey}.md`); // legacy: no spec- prefix
   return out;
 }
 

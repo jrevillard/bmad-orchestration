@@ -57,11 +57,16 @@ function extractStoryId(storyKey) {
 function specPathCandidates(storyId, storyKey) {
   const base = '_bmad-output/implementation-artifacts';
   const out = [];
+  // EXACT first — see bmad-build-converge.js for the full rationale: the sprint-mode
+  // slug comes from the title via sprint_plan's _slug, so it matches the key in the
+  // normal case, and a story can have SIBLING spec files (…-blocked-attempt.md) that
+  // would make the prefix glob alone ambiguous.
+  if (storyKey) out.push(`${base}/spec-${storyKey}.md`);
   if (storyId) {
     out.push(`${base}/spec-${storyId}-*.md`);       // sprint mode
     out.push(`${base}/stories/${storyId}-*.md`);    // stories mode
   }
-  if (storyKey) out.push(`${base}/${storyKey}.md`); // legacy: exact-key, no prefix
+  if (storyKey) out.push(`${base}/${storyKey}.md`); // legacy: no spec- prefix
   return out;
 }
 

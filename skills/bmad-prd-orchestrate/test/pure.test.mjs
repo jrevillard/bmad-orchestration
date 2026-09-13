@@ -1004,9 +1004,10 @@ test('extractStoryId takes the <epic>-<story> prefix', () => {
   assert.equal(fn(null), '');
 });
 
-test('specPathCandidates orders sprint mode, then stories mode, then legacy', () => {
+test('specPathCandidates orders exact, then sprint, then stories, then legacy', () => {
   const fn = extractFunction(SCRIPT_SOURCE, 'specPathCandidates');
   assert.deepEqual([...fn('2-1', '2-1-deferred-work-ledger-round-trip')], [
+    '_bmad-output/implementation-artifacts/spec-2-1-deferred-work-ledger-round-trip.md',
     '_bmad-output/implementation-artifacts/spec-2-1-*.md',
     '_bmad-output/implementation-artifacts/stories/2-1-*.md',
     '_bmad-output/implementation-artifacts/2-1-deferred-work-ledger-round-trip.md',
@@ -1028,6 +1029,16 @@ test('renderSpecDiscovery resolves one story key', () => {
   assert.match(out, /spec-2-1-\*\.md/);
   assert.match(out, /stories\/2-1-\*\.md/);
   assert.match(out, /2-1-deferred-work-ledger-round-trip\.md/);
+});
+
+test('specPathCandidates puts the exact name ahead of the id-prefix glob', () => {
+  // A story can have SIBLING spec files (`…-blocked-attempt.md` from an intent-gap
+  // escalation), which makes the prefix glob ambiguous for a story that is fine.
+  // The exact candidate resolves it before the ambiguity HALT can fire.
+  const fn = extractFunction(SCRIPT_SOURCE, 'specPathCandidates');
+  const c = fn('1-5', '1-5-add-tests-test_hello-py-with-one-passing-test');
+  assert.equal(c[0], '_bmad-output/implementation-artifacts/spec-1-5-add-tests-test_hello-py-with-one-passing-test.md');
+  assert.match(c[1], /\*\.md$/);
 });
 
 test('findUnknownStoryKeys returns keys the plan never produced', () => {
