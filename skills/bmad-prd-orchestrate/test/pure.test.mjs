@@ -915,8 +915,16 @@ test('guard: the per-story loop persists state on every iteration', () => {
   // without halting never updated state.json (observed: 33 minutes and three
   // stories behind its own journal). Anchored on the comment so that removing
   // either the persist call or the explanation trips this guard.
-  assert.match(SCRIPT_SOURCE, /\/\/ Persist after EVERY story[\s\S]{0,400}?persistOrHalt\(state\)/,
+  assert.match(SCRIPT_SOURCE, /\/\/ Persist after EVERY story[\s\S]{0,800}?persistOrHalt\(state\)/,
     'the per-story loop must persist via persistOrHalt(state) right after storyQueue.shift()');
+
+  // The three early-`continue` paths each mutate state and then jump back to the loop
+  // head, so they must persist too — otherwise "persist after every story" is false
+  // for exactly the paths a mid-loop crash would lose. Asserted by call-site count so
+  // deleting any one of them trips the guard, not just the loop-tail one.
+  assert.equal([...SCRIPT_SOURCE.matchAll(/await persistOrHalt\(/g)].length, 10,
+    'expected 10 persistOrHalt call sites: loop tail, 3 early-continue branches, '
+    + '3 plan-phase writes, pre-loop, post-loop, Phase 4 retry');
 });
 
 test('guard: a failed state write stops the run', () => {
@@ -1062,4 +1070,41 @@ test('findUnknownStoryKeys catches the two-identities case', () => {
   const known = ['1-5-add-tests-test_hello-py-with-one-passing-test'];
   const fromDisk = ['1-5-add-tests-test_hello.py-with-one-passing-test'];
   assert.deepEqual([...fn(fromDisk, known)], fromDisk);
+});
+
+test('storyKeysOf unwraps the object entries held by blocked and skipped', () => {
+  // Regression: blocked/skipped hold {story, reason} objects while
+  // completed/storyQueue hold bare keys. Feeding the objects straight to the set
+  // membership test is ALWAYS false, so the state-key validator halted every resume
+  // of a run with a blocked or skipped story — the retry_blocked / fix_then_resume
+  // recovery paths it is supposed to protect.
+  const fn = extractFunction(SCRIPT_SOURCE, 'storyKeysOf');
+  assert.deepEqual([...fn(['1-1-a', '1-2-b'])], ['1-1-a', '1-2-b']);
+  assert.deepEqual([...fn([{ story: '1-9-prev', reason: 'ci_hardfail' }])], ['1-9-prev']);
+  assert.deepEqual([...fn([{ story: '1-3-c', reason: 'unmet_deps', deps: ['x'] }, '1-4-d'])], ['1-3-c', '1-4-d']);
+  // Falsy and malformed entries are dropped, not turned into 'undefined'.
+  assert.deepEqual([...fn([null, undefined, '', {}, { reason: 'no story' }])], []);
+  assert.deepEqual([...fn(null)], []);
+  assert.deepEqual([...fn(undefined)], []);
+});
+
+test('storyKeysOf output is what makes a blocked-entry resume pass validation', () => {
+  // End-to-end shape of the regression: a realistic state whose blocked entry is a
+  // known story must yield NO unknown keys once unwrapped.
+  const keysOf = extractFunction(SCRIPT_SOURCE, 'storyKeysOf');
+  const unknown = extractFunction(SCRIPT_SOURCE, 'findUnknownStoryKeys');
+  const state = {
+    storyQueue: [], completed: ['1-1-a'],
+    blocked: [{ story: '1-9-prev', reason: 'ci_hardfail' }],
+    skipped: [{ story: '1-3-c', reason: 'unmet_deps' }],
+    awaitingOperator: ['1-7-e'],
+  };
+  const known = ['1-1-a', '1-9-prev', '1-3-c', '1-7-e'];
+  const loaded = [
+    ...keysOf(state.storyQueue), ...keysOf(state.completed),
+    ...keysOf(state.blocked), ...keysOf(state.skipped), ...keysOf(state.awaitingOperator),
+  ];
+  assert.deepEqual([...unknown(loaded, known)], []);
+  // And without unwrapping, the same state must look broken — this is the bug.
+  assert.notDeepEqual([...unknown([...state.blocked], known)], []);
 });

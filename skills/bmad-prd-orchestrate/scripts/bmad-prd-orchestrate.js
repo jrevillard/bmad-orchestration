@@ -96,6 +96,21 @@ function findUnknownStoryKeys(keys, known) {
   return (keys || []).filter(k => k && !knownSet.has(k));
 }
 
+// storyKeysOf(entries) → the story key of each entry, falsy entries dropped.
+// state.blocked and state.skipped do NOT hold strings: they hold {story, reason}
+// objects (skipped at :1182, blocked at :1226/:1245/:1266/:1279/:1308,
+// moveBlockedToSkipped at :289-295), while completed/storyQueue/awaitingOperator hold
+// bare keys. Comparing the objects raw against a Set of known strings is ALWAYS
+// false — which would make the state-key validator halt exactly the recovery paths
+// (retry_blocked, fix_then_resume) it exists to protect.
+// Same normalization idiom as removeFromState / requeueCIHardfails.
+// Pure, unit-tested (test/pure.test.mjs).
+function storyKeysOf(entries) {
+  return (entries || [])
+    .map(e => (typeof e === 'string' ? e : (e && e.story) || null))
+    .filter(Boolean);
+}
+
 // base64Encode(input) → string
 // Pure-JS UTF-8 → base64 encoder (Workflow runtime lacks `Buffer` + `btoa`).
 // Used by writeState's bash command to safely embed state/deps JSON in a
@@ -720,7 +735,9 @@ async function persistState(stateObj) {
 // disk. Continuing is how a resume ends up re-running stories that already
 // converged or already blocked.
 //
-// Call sites read:  const h = await persistOrHalt(state); if (h) return h;
+// Call sites read:  const h = persistOrHaltOrNull(state); if (h) return h;
+//   (the real call is this function awaited — written as a plain call above so the
+//   call-site count guard in test/pure.test.mjs does not count this comment as one)
 // Sites that are about to halt anyway (they return buildHaltContext on the very
 // next line) keep plain persistState — the run is stopping regardless, and the
 // halt context is returned from memory.
@@ -892,25 +909,35 @@ if (resume) {
       // dispatching it would run a story nothing else recognises. Halt loudly:
       // verified live, state.json carried `test_hello.py-…` while sprint-status,
       // deps.json and the journal all carried `test_hello-py-…`.
-      const knownKeys = [
-        ...(planResult.storyQueue || []), ...(planResult.completed || []),
-        ...(planResult.blocked || []), ...(planResult.skipped || []),
-        ...(planResult.awaitingOperator || []),
-        ...((planResult.inferred || []).map(e => e && e.story).filter(Boolean)),
-      ];
-      const loadedKeys = [
-        ...state.storyQueue, ...state.completed, ...state.blocked,
-        ...state.skipped, ...state.awaitingOperator,
-      ];
-      const unknownKeys = findUnknownStoryKeys(loadedKeys, knownKeys);
-      if (unknownKeys.length > 0) {
-        log(`HALT: state.json holds ${unknownKeys.length} story key(s) the plan never produced: ${unknownKeys.join(', ')}`)
-        await appendJournal({ event: 'state_key_rejected', unknown: unknownKeys, knownCount: knownKeys.length });
-        return buildHaltContext('state_key_rejected', {
-          unknownKeys,
-          knownKeysSample: knownKeys.slice(0, 20),
-          hint: 'An unknown key means one story has two identities — usually a title-derived slug (spec-*.md naming) where sprint-status.yaml has the canonical key. Diff state.json against sprint-status.yaml, fix the key, then resume.',
-        }, timestamp, runDir, ['continue', 'abort_prd']);
+      //
+      // SKIPPED when the run is scoped (--epic / --story): the plan then covers a
+      // SUBSET by design (see the plan prompt's EPIC_FILTER/STORY_FILTER), so "not in
+      // the plan" carries no signal and every out-of-scope key on disk would look
+      // unknown — turning a legitimate filtered resume into a halt.
+      if (!epicKey && !storyKey) {
+        const knownKeys = [
+          ...(planResult.storyQueue || []), ...(planResult.completed || []),
+          ...(planResult.blocked || []), ...(planResult.skipped || []),
+          ...(planResult.awaitingOperator || []),
+          ...((planResult.inferred || []).map(e => e && e.story).filter(Boolean)),
+        ];
+        // storyKeysOf unwraps the {story, reason} entries held by blocked/skipped —
+        // see its comment; comparing those objects raw would always read as unknown.
+        const loadedKeys = [
+          ...storyKeysOf(state.storyQueue), ...storyKeysOf(state.completed),
+          ...storyKeysOf(state.blocked), ...storyKeysOf(state.skipped),
+          ...storyKeysOf(state.awaitingOperator),
+        ];
+        const unknownKeys = findUnknownStoryKeys(loadedKeys, knownKeys);
+        if (unknownKeys.length > 0) {
+          log(`HALT: state.json holds ${unknownKeys.length} story key(s) the plan never produced: ${unknownKeys.join(', ')}`)
+          await appendJournal({ event: 'state_key_rejected', unknown: unknownKeys, knownCount: knownKeys.length });
+          return buildHaltContext('state_key_rejected', {
+            unknownKeys,
+            knownKeysSample: knownKeys.slice(0, 20),
+            hint: 'An unknown key means one story has two identities — usually a title-derived slug (spec-*.md naming) where sprint-status.yaml has the canonical key. Diff state.json against sprint-status.yaml, fix the key, then resume.',
+          }, timestamp, runDir, ['continue', 'abort_prd']);
+        }
       }
       log(`Resumed from ${resume}: queueSize=${state.storyQueue.length} completed=${state.completed.length} blocked=${state.blocked.length} iterationCount=${state.iterationCount}`)
     } else {
@@ -1159,6 +1186,8 @@ ${bashReadCmd}`,
     log(`Story ${sk} in awaiting-operator; parking (not executing)`)
     state.awaitingOperator.push(sk);
     state.storyQueue.shift();
+    const parkHalt = await persistOrHalt(state);
+    if (parkHalt) return parkHalt;
     continue;
   }
 
@@ -1168,6 +1197,8 @@ ${bashReadCmd}`,
     state.completed.push(sk);
     state = removeFromState(state, sk);
     state.storyQueue.shift();
+    const doneHalt = await persistOrHalt(state);
+    if (doneHalt) return doneHalt;
     continue;
   }
 
@@ -1182,6 +1213,8 @@ ${bashReadCmd}`,
     state.skipped.push({ story: sk, reason: 'unmet_deps', deps: unmetDeps });
     state.storyQueue.shift();
     await appendJournal({ event: 'skip', storyKey: sk, reason: 'unmet_deps', deps: unmetDeps });
+    const skipHalt = await persistOrHalt(state);
+    if (skipHalt) return skipHalt;
     continue;
   }
 
@@ -1312,11 +1345,13 @@ ${bashReadCmd}`,
 
   state.storyQueue.shift();
 
-  // Persist after EVERY story. Previously the loop wrote state only on halt paths,
-  // so a run that progressed without halting never updated state.json: a live run
-  // was observed 33 minutes and three stories behind its own journal (completed
-  // missing a converged story, blocked missing a blocked one), which is exactly
-  // what makes a resume re-run finished work.
+  // Persist after EVERY story, including the three paths that `continue` early —
+  // awaiting-operator parking, already-done, and unmet-dep skipping each mutate
+  // state and used to jump straight back to the loop head. Previously the loop wrote
+  // state only on halt paths, so a run that progressed without halting never updated
+  // state.json: a live run was observed 33 minutes and three stories behind its own
+  // journal (completed missing a converged story, blocked missing a blocked one),
+  // which is exactly what makes a resume re-run finished work.
   const loopWriteHalt = await persistOrHalt(state);
   if (loopWriteHalt) return loopWriteHalt;
 
