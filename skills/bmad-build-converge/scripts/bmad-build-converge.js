@@ -616,11 +616,17 @@ STEPS:
    never invent it. Paths below are relative to <worktreePath>.
    Try these in order, first hit wins:
 ${renderSpecDiscovery(storyKey)}
-   - Take the FIRST candidate that matches. TWO matches in the same pattern means the
-     producer is ambiguous: HALT with the candidates listed rather than picking one.
+   - Take the FIRST candidate that matches. If ONE pattern matches SEVERAL files, the
+     real spec is the SHORTEST name: escalation artifacts are suffixed
+     (spec-<id>-<slug>-blocked-attempt.md is what an intent-gap exit leaves behind), so
+     the plain spec is never the longest. Log every candidate you skipped.
+   - Only if two matches are the SAME length is this genuinely ambiguous: HALT and list
+     them. Never halt merely because a sibling artifact exists.
    - If nothing matches yet (normal first run — the spec does not exist until Build),
-     return the first candidate pattern's concrete form for story ${storyKey}:
-     the spec-<storyId>-<slug>.md name under implementation-artifacts. Do NOT fall
+     return the FIRST candidate's concrete form for story ${storyKey} — i.e.
+     spec-${storyKey}.md under implementation-artifacts (the exact name matches the
+     sprint key whenever the key was derived from the same title, which is the normal
+     case). Do NOT fall
      back to a stories/<key>.md path — that directory does not exist in sprint mode,
      which is what this PRD uses (sprint-status.yaml is present, no stories.yaml).
    - The slug is derived from the story title and WILL differ from the story key
@@ -919,7 +925,9 @@ STEPS:
    chooses it). In <worktree>, list _bmad-output/implementation-artifacts and take the
    file matching (first hit wins):
 ${renderSpecDiscovery(setup.storyKey)}
-   Two matches in one pattern → HALT with the candidates listed. No match → fall back
+   One pattern matching SEVERAL files → take the SHORTEST name (escalation artifacts
+   are suffixed, e.g. -blocked-attempt.md, so the plain spec is never the longest) and
+   log the skipped ones; halt only on a same-length tie. No match → fall back
    to ${setup.specPath}; if that does not exist either, return an error naming the
    patterns you tried — do NOT proceed as if the deliverable check had passed.
 2. FILE-EXISTENCE CHECK (deliverable guard): for each path in 'files' field, run \`ls -1 <worktree>/<path> | head -1\`. If ANY missing → return with error + pushed=false + followupReviewRecommended=true.
@@ -1106,7 +1114,9 @@ STEPS:
    chooses it). In <worktree>, list _bmad-output/implementation-artifacts and take the
    file matching (first hit wins):
 ${renderSpecDiscovery(setup.storyKey)}
-   Two matches in one pattern → HALT with the candidates listed. No match → fall back
+   One pattern matching SEVERAL files → take the SHORTEST name (escalation artifacts
+   are suffixed, e.g. -blocked-attempt.md, so the plain spec is never the longest) and
+   log the skipped ones; halt only on a same-length tie. No match → fall back
    to ${setup.specPath}; if that does not exist either, return an error naming the
    patterns you tried — do NOT proceed as if the deliverable check had passed.
 2. FILE-EXISTENCE CHECK (deliverable guard): for each path in 'files' field, run \`ls -1 <worktree>/<path> | head -1\`. If ANY missing → return with error + pushed=false + followupReviewRecommended=true.

@@ -528,7 +528,11 @@ STEPS:
    a. Iterate sprint-status.epics in order. For each epic:
       - Skip if epicFilter set and epic.id != epicFilter.
       - Epic dep check: if epic.depends_on contains epic IDs, that dep is satisfied ONLY when EVERY story in the dep epic has development_status[canonicalKey] === 'done'. DERIVE this — do NOT read epic.status (stays "backlog" forever even when all stories done).
-      - If unsatisfied, mark epic as blocked (skip its stories, add to skipped[] with reason: 'epic_blocked').
+      - If unsatisfied, mark epic as blocked and add each of its stories to skipped[].
+        skipped[] holds CANONICAL STORY KEYS ONLY (strings) — the schema declares
+        items:string and every consumer treats them as keys. The reason belongs in the
+        journal entry for the skip, never in the array: an object here would make the
+        orchestrator's key validation reject every real key and halt the resume.
       - Otherwise, iterate epic.stories (numeric ids) in order. For each numeric id:
         - Resolve canonical key via the lookup from step 2.
         - Skip if storyFilter set and canonical != storyFilter.
@@ -549,8 +553,10 @@ STEPS:
       relative to <prdWorktreePath>; first hit wins:
 ${renderSpecPatterns()}
       Replace <storyId> with the story key's first two dash-separated segments
-      (2-1-deferred-work-ledger-round-trip → 2-1). Two matches in one pattern →
-      HALT with the candidates listed. No match → the story simply has no spec yet:
+      (2-1-deferred-work-ledger-round-trip → 2-1). One pattern matching SEVERAL files
+      → take the SHORTEST name (escalation artifacts are suffixed, e.g.
+      -blocked-attempt.md, so the plain spec is never the longest) and note the skipped
+      ones; halt only on a same-length tie. No match → the story simply has no spec yet:
       skip its depends_on extraction, do NOT invent a path, do NOT fail the plan.
    b. Extract depends_on from spec frontmatter if present.
    c. If absent, scan spec body for story key mentions (regex: /\\b\\d+-\\d+[a-z]?\\b/g) and "depends on story X" phrasing.
@@ -916,10 +922,14 @@ if (resume) {
       // unknown — turning a legitimate filtered resume into a halt.
       if (!epicKey && !storyKey) {
         const knownKeys = [
-          ...(planResult.storyQueue || []), ...(planResult.completed || []),
-          ...(planResult.blocked || []), ...(planResult.skipped || []),
-          ...(planResult.awaitingOperator || []),
-          ...((planResult.inferred || []).map(e => e && e.story).filter(Boolean)),
+          // storyKeysOf on BOTH sides: the plan is agent-authored, and the plan prompt
+          // used to invite `{story, reason}` entries in skipped[]. Feeding objects in
+          // here would make every loaded string key look unknown — the same halt-on-a-
+          // healthy-resume failure the loaded side was already fixed for, mirrored.
+          ...storyKeysOf(planResult.storyQueue), ...storyKeysOf(planResult.completed),
+          ...storyKeysOf(planResult.blocked), ...storyKeysOf(planResult.skipped),
+          ...storyKeysOf(planResult.awaitingOperator),
+          ...storyKeysOf((planResult.inferred || []).map(e => e && e.story)),
         ];
         // storyKeysOf unwraps the {story, reason} entries held by blocked/skipped —
         // see its comment; comparing those objects raw would always read as unknown.

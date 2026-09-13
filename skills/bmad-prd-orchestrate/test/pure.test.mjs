@@ -1088,6 +1088,32 @@ test('storyKeysOf unwraps the object entries held by blocked and skipped', () =>
   assert.deepEqual([...fn(undefined)], []);
 });
 
+test('guard: BOTH sides of the key comparison are normalized', () => {
+  // knownKeys comes from an AGENT-authored plan and loadedKeys from disk, and either
+  // can hold {story, reason} objects. Normalizing only one side makes every real key
+  // look unknown and halts a healthy resume — the bug the earlier fix left mirrored.
+  const known = SCRIPT_SOURCE.match(/const knownKeys = \[[\s\S]*?\n\s*\];/);
+  assert.ok(known, 'knownKeys block not found');
+  for (const side of ['storyQueue', 'completed', 'blocked', 'skipped', 'awaitingOperator']) {
+    assert.match(known[0], new RegExp(`storyKeysOf\\(planResult\\.${side}\\)`),
+      `plan-side ${side} must be unwrapped with storyKeysOf`);
+  }
+  const loaded = SCRIPT_SOURCE.match(/const loadedKeys = \[[\s\S]*?\n\s*\];/);
+  assert.ok(loaded, 'loadedKeys block not found');
+  for (const side of ['storyQueue', 'completed', 'blocked', 'skipped', 'awaitingOperator']) {
+    assert.match(loaded[0], new RegExp(`storyKeysOf\\(state\\.${side}\\)`),
+      `state-side ${side} must be unwrapped with storyKeysOf`);
+  }
+});
+
+test('guard: the plan prompt never invites object entries in skipped[]', () => {
+  // The plan schema declares skipped as items:string and every consumer treats them as
+  // keys. Prose that asks for a reason inside the array is what made the asymmetry
+  // possible, so the invitation must not come back — the reason belongs in the journal.
+  assert.doesNotMatch(SCRIPT_SOURCE, /add to skipped\[\] with reason/,
+    'the plan prompt invites {story, reason} objects into skipped[], which the schema forbids');
+});
+
 test('storyKeysOf output is what makes a blocked-entry resume pass validation', () => {
   // End-to-end shape of the regression: a realistic state whose blocked entry is a
   // known story must yield NO unknown keys once unwrapped.
