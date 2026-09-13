@@ -595,17 +595,20 @@ STEPS:
    - Update last_updated to "${timestamp}"
    - git add + commit -m "chore(sprint-status): story <storyKey> → in-progress"
    - DO push this commit (so MR create phase has something to point at): \`git push origin \${storyBranch}\` (use --force-with-lease if local is ahead).
-7b. Declare that THIS caller handles CI, so the issue-tracking module's post-completion
-    chain does not repeat the wait inside every build dispatch:
+7b. Declare that THIS caller owns the whole post-completion chain, so bmad-build-auto's
+    terminal hook does NOTHING:
       printf 'ci handled by bmad-build-converge\n' > <worktreePath>/.bmad-ci-handled
-    Why: bmad-build-auto's terminal hook runs the module's post-dev-complete.yaml, which
-    waits for CI to go green and writes ci-status.json. Those steps exist for bmad-loop's
-    verify contract, which this orchestrator does not use — it polls the pipeline itself
-    (scripts/ci-monitor.sh) after the build converges, and the convergence loop
-    deliberately does NOT wait for CI between review iterations. The run traces measured
-    that hook wait at 47-305 s per build dispatch.
-    The module reads the marker and skips those steps; without it the behaviour is
-    unchanged, so this is safe for any consumer that does not create it.
+    Why: that hook runs the issue-tracking module's chain (post-build-dispatch-auto →
+    post-build-dispatch → post-dev-complete), which pushes, ensures the MR, waits for CI,
+    writes ci-status.json, updates the issue and posts comments. This orchestrator already
+    does all of the machinery itself — it pushes (step 7 and the post-build agent), ensures
+    the MR (phase 2), polls the pipeline (scripts/ci-monitor.sh) and merges (phase C) — so
+    running the chain too is a pure duplicate. Worse, its CI wait re-introduces inside every
+    build dispatch the delay the convergence loop deliberately removed ("NO CI WAIT …
+    saves ~3-5min per iter"); the run traces measured it at 47-305 s per dispatch.
+    The module's dispatcher reads this marker at its very first step and stops there, before
+    check-config, before the spec read, before any phase. Without the marker the behaviour is
+    exactly as before, so bmad-loop and every other consumer are untouched.
     The marker is UNTRACKED on purpose: do NOT git add it, do NOT commit it. It dies with
     the worktree (cleanup removes the worktree at the end of this run).
 8. SYNC STORY ISSUE → in-progress on the issue tracker (soft-fail — a missing or

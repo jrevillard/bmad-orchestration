@@ -158,9 +158,11 @@ dispatches, and 151 s in a successful 1-4 dispatch — against 52-83 s for conve
 `ci-check`.
 
 **The channel is a FILE, not an environment variable.** The setup agent writes
-`<worktreePath>/.bmad-ci-handled` (prompt step 7b); `post-dev-complete` reads
-`{worktree}/.bmad-ci-handled` and skips its two CI blocks when it is non-empty. Absent
-marker → empty → the blocks run, so bmad-loop and every other consumer are unchanged.
+`<worktreePath>/.bmad-ci-handled` (prompt step 7b). The module reads it at the FIRST step of
+`common/post-build-dispatch-auto.yaml` — the hook's entry point — and stops there, so under
+converge the **entire chain does nothing**: no `check-config`, no spec read, no status
+routing, no phase. Absent marker → the chain runs exactly as before, so bmad-loop and every
+other consumer are unchanged.
 
 - **Never retry the env-var route.** `BMAD_SKIP_CI_WAIT` was written and reverted: the
   module's suite forbids any shell variable in a step
