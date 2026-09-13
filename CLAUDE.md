@@ -104,3 +104,67 @@ the gates. For all other `.js` files in the repo, plain `node --check <file>` is
   runtime. The sub-workflow dispatch global is lowercase `workflow(nameOrRef, args?)`
   (2-arg form). `Workflow` (capital W) is the main-conversation tool and throws
   `ReferenceError` from inside a workflow script.
+
+## Story/spec discovery — never re-derive the filename
+
+`bmad-build-auto` OWNS the spec filename, and its slug comes from the story TITLE via
+`sprint_plan._slug` (`[^\w]+ -> '-'`, underscore preserved). So the name equals the
+sprint-status key only when both were derived from the same title — `test_hello.py`
+slugs to `test_hello-py`. Two slugifiers disagreeing once put `test_hello.py-…` in
+`state.json` while sprint-status, deps.json and the journal all had `test_hello-py-…`:
+**one story, two identities**, and a story that merged while its issue stayed `backlog`.
+
+- `specPathCandidates()` / `extractStoryId()` encode the rule; `renderSpecDiscovery()`
+  and `renderSpecPatterns()` render it INTO the agent prompts, so prompt and rule cannot
+  drift (same idiom as `describeSchema`). Edit the rule once, in one place per script —
+  the two scripts cannot import each other, so both copies must change together.
+- Order: **exact `spec-<key>.md` first**, then `spec-<storyId>-*.md` (sprint mode), then
+  `stories/<storyId>-*.md` (stories mode), then the legacy `{key}.md`.
+- On several matches in ONE pattern, take the **shortest** name: escalation artifacts are
+  suffixed (`…-blocked-attempt.md`, what an intent-gap exit leaves behind), so a suffix
+  only ever makes a name longer. Halt only on a same-length tie.
+- Two known gaps, both outside this repo: story **1-1's spec has no id prefix at all**
+  (`spec-create-hello-py-with-print-hello.md`), so no candidate list finds it; and Phase
+  4 passes `--stories-dir` at a directory that does not exist in sprint mode, where
+  `sprint_plan.py:271` guards the scan with `is_dir()` and silently skips its
+  `ready-for-dev` upgrade (its `:278` also matches `{key}.md`, not the producer's name).
+  Fixing that belongs upstream in `bmad-sprint-planning`.
+
+## State keys are validated on read — both sides
+
+After `loadState`, every key is checked against the keys the plan produced. An unknown
+key means a story has two identities, so the run **halts** (`state_key_rejected`) with
+the offending key rather than dispatching a name nothing else recognises.
+
+- `storyKeysOf()` must wrap **both** sides of the comparison. `state.blocked`/`skipped`
+  hold `{story, reason}` OBJECTS while `completed`/`storyQueue` hold bare keys, and the
+  plan is agent-authored so it can hold either. Normalizing one side only makes every
+  real key read as unknown and halts a healthy resume — that bug shipped once in each
+  direction.
+- The validator is **skipped when the run is scoped** (`--epic`/`--story`): the plan then
+  covers a subset by design, so "not in the plan" carries no signal.
+- The pure-function tests must feed **object-form** `blocked`/`skipped` entries. Feeding
+  strings only is how the Critical above passed CI.
+
+## Interference from the module's `on_complete` hook (measured, unresolved)
+
+`bmad-build-auto`'s terminal hook runs the `bmad-issue-tracking` module's
+`post-build-dispatch.yaml` → `post-dev-complete.yaml`, which pushes, waits for CI, writes
+`ci-status.json`, updates the issue and ensures the MR. **Inside every build dispatch.**
+That duplicates our own MR/CI/issue work, and worse, it re-introduces the CI wait the
+convergence loop deliberately removed (`bmad-build-converge.js` PHASE A: "NO CI WAIT …
+saves ~3-5min per iter"). Measured from the run traces: **47 s, 55 s, 305 s** of CI
+waiting inside three 2-1 build dispatches, and 151 s in a successful 1-4 dispatch —
+against 52-83 s for converge's own `ci-check`.
+
+**Do not try to signal it away with an environment variable.** That was tried and
+reverted: the module's own suite forbids raw shell variables in workflow steps
+(`tests/test_command_patterns.py::test_no_unresolved_shell_vars` — only `NF` is allowed),
+so no `$VAR`/`${VAR}` channel exists, and its `test_variable_flow.py` separator rule
+additionally flags a `${X:-default}` colon as a hardcoded label separator. There is also
+no way to distinguish our calls from bmad-loop's at that level: both drive the same
+`bmad-build-auto`. Removing the hook's steps would break bmad-loop, whose `[verify]`
+command requires the `ci-status.json` only the hook writes
+(`skills/bmad-issue-tracking-setup/scripts/bmad-loop/ci-gate/ci-status.sh:32`).
+
+Current position: **accept the cost**. It buys wall-clock, not correctness.
