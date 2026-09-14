@@ -1132,6 +1132,14 @@ let lastEpic = null;
 // for stories already 'done' before this run ever dispatched them.
 const syncedThisRun = [];
 while (state.storyQueue.length > 0) {
+  // Read `sk` BEFORE the requeue block — the bash dispatch below uses it in a template
+  // literal, so it has to be in scope. `const sk = …` is still the queue's current head;
+  // if the requeue unshifts, the freshly added stories are now at indices [0, k) and `sk`
+  // sits at index k, and the loop's NEXT iteration will pick it up unchanged. (If the
+  // requeued set contains the same key as `sk` itself, the unshift puts it at index 0 — the
+  // loop's next iteration will read it as the new sk; the unmet-deps check will pass since
+  // the requeue required all deps met, and the story will dispatch, not re-skip.)
+  const sk = state.storyQueue[0];
   // Re-evaluate skipped stories whose deps are now met. Single all-read (only when
   // skipped is non-empty, so the common case is zero extra work). The bash helper's
   // deps arg accepts a comma-separated list of any keys, so we pass the union of every
@@ -1161,7 +1169,6 @@ ${skippedReadCmd}`,
       }
     }
   }
-  const sk = state.storyQueue[0];
   state.iterationCount++;
 
   // Epic-boundary HITL: detect transition from previous story's epic.
