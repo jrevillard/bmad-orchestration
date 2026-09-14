@@ -922,9 +922,9 @@ test('guard: the per-story loop persists state on every iteration', () => {
   // head, so they must persist too — otherwise "persist after every story" is false
   // for exactly the paths a mid-loop crash would lose. Asserted by call-site count so
   // deleting any one of them trips the guard, not just the loop-tail one.
-  assert.equal([...SCRIPT_SOURCE.matchAll(/await persistOrHalt\(/g)].length, 10,
-    'expected 10 persistOrHalt call sites: loop tail, 3 early-continue branches, '
-    + '3 plan-phase writes, pre-loop, post-loop, Phase 4 retry');
+  assert.equal([...SCRIPT_SOURCE.matchAll(/await persistOrHalt\(/g)].length, 11,
+    'expected 11 persistOrHalt call sites: loop top (skipped-requeue), loop tail, '
+    + '3 early-continue branches, 3 plan-phase writes, pre-loop, post-loop, Phase 4 retry');
 });
 
 test('guard: a failed state write stops the run', () => {
@@ -996,6 +996,44 @@ test('normalizeStateArrays replaces non-array values, not just missing ones', ()
   const fn = extractFunction(SCRIPT_SOURCE, 'normalizeStateArrays');
   const out = fn({ skipped: null, awaitingOperator: 'nope', blocked: 'also wrong' });
   assert.ok(Array.isArray(out.skipped) && Array.isArray(out.awaitingOperator) && Array.isArray(out.blocked));
+});
+
+test('requeueSkippedWithMetDeps moves eligible stories to the front of the queue', () => {
+  // Regression: a story that landed in skipped[] at a prior unmet-deps moment sat
+  // there indefinitely because userChoice handlers only move blocked→queue, not
+  // skipped→queue, and nothing re-evaluated skipped[] at the top of the loop. The
+  // dispatch then waited for a manual resume that never came. The fix re-evaluates
+  // on every loop iter and unshifts the eligible ones at the front of the queue.
+  const fn = extractFunction(SCRIPT_SOURCE, 'requeueSkippedWithMetDeps', ['findUnmetDeps']);
+  const baseState = {
+    storyQueue: ['3-2', '3-5', '3-3'],
+    completed: ['3-1'],
+    blocked: [],
+    skipped: [
+      { story: '2-2', reason: 'unmet_deps', deps: ['1-1', '2-1'] },   // now met
+      { story: '2-3', reason: 'unmet_deps', deps: ['2-1'] },            // now met
+      { story: '2-4', reason: 'unmet_deps', deps: ['1-1'] },            // now met
+      { story: '2-5', reason: 'unmet_deps', deps: ['2-99'] },          // not met, stays skipped
+    ],
+    awaitingOperator: [],
+    halts: [],
+  };
+  const depStatuses = {
+    '1-1': 'done', '2-1': 'done', '2-99': 'backlog',
+  };
+  const { state, requeued } = fn(baseState, depStatuses);
+  // The three that became eligible come back, in skipped order, at the front of the queue.
+  assert.deepEqual([...requeued.map(r => r.story)], ['2-2', '2-3', '2-4']);
+  for (const r of requeued) assert.equal(r.reason, 'unmet_deps_now_met');
+  assert.deepEqual([...state.storyQueue], ['2-2', '2-3', '2-4', '3-2', '3-5', '3-3']);
+  // 2-5 stays skipped with the original entry (deps preserved).
+  assert.equal(state.skipped.length, 1);
+  assert.equal(state.skipped[0].story, '2-5');
+  assert.deepEqual([...state.skipped[0].deps], ['2-99']);
+  // Items with no deps (legacy / malformed) move out of skipped too — safe to re-dispatch.
+  const { state: s2, requeued: r2 } = fn({ ...baseState, skipped: [{ story: 'X', reason: 'foo' }] }, depStatuses);
+  assert.equal(r2.length, 1);
+  assert.equal(s2.storyQueue[0], 'X');
 });
 
 // ============================================================================

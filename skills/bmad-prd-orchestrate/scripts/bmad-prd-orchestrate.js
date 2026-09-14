@@ -182,6 +182,37 @@ function findUnmetDeps(deps, depStatuses) {
   return deps.filter(d => (depStatuses || {})[d] !== 'done');
 }
 
+// requeueSkippedWithMetDeps(state, depStatuses) → { state, requeued: [{story, reason}] }
+//
+// A story that landed in skipped[] because a dep was unmet at the time sat there
+// indefinitely — a follow-up story would satisfy that dep, but nothing re-evaluates
+// skipped[] at the top of the loop, and userChoice handlers (retry_blocked,
+// skip_blocked) only move blocked→queue, not skipped→queue. Result: a story stays
+// frozen until resume, even when its deps have been met.
+//
+// Pure: takes the merged sprint-status map, returns a new state with the eligible
+// stories unshifted at the front of storyQueue (they were waiting longest) and the
+// rest of skipped[] preserved. No dispatch here — the caller dispatches the single
+// all-read once (only when skipped is non-empty, to keep the common case free).
+// Test in test/pure.test.mjs.
+function requeueSkippedWithMetDeps(state, depStatuses) {
+  const requeued = [];
+  const stillSkipped = [];
+  for (const item of (state.skipped || [])) {
+    if (findUnmetDeps(item.deps || [], depStatuses).length === 0) {
+      requeued.push({ story: item.story, reason: 'unmet_deps_now_met' });
+    } else {
+      stillSkipped.push(item);
+    }
+  }
+  if (requeued.length === 0) return { state, requeued: [] };
+  const stories = requeued.map(r => r.story);
+  return {
+    state: { ...state, storyQueue: [...stories, ...(state.storyQueue || [])], skipped: stillSkipped },
+    requeued,
+  };
+}
+
 // normalizeStateArrays(state) → state with every collection field guaranteed to be
 // an array. Three sources can omit a field: state.json written by an older version,
 // an agent-authored write, and a helper that rebuilt the object. A missing field is
@@ -1101,6 +1132,35 @@ let lastEpic = null;
 // for stories already 'done' before this run ever dispatched them.
 const syncedThisRun = [];
 while (state.storyQueue.length > 0) {
+  // Re-evaluate skipped stories whose deps are now met. Single all-read (only when
+  // skipped is non-empty, so the common case is zero extra work). The bash helper's
+  // deps arg accepts a comma-separated list of any keys, so we pass the union of every
+  // skipped story's deps and get the lot in one call.
+  if (state.skipped && state.skipped.length > 0) {
+    const skippedDeps = [...new Set(state.skipped.flatMap(i => i.deps || []))];
+    if (skippedDeps.length > 0) {
+      const skippedReadCmd = `"${args_.helpersDir || ''}orchestrate-helper.sh" all-read '${setup.sprintStatusPath}' '${sk}' '${skippedDeps.join(',')}'`;
+      const skippedRead = await agent(
+        `Run this exact bash command. Return its stdout verbatim. Do NOT modify, summarize, or diagnose.
+
+COMMAND:
+${skippedReadCmd}`,
+        { label: `skipped-recheck-${state.iterationCount}`, phase: 'Execute', schema: {
+          type: 'object',
+          properties: { depStatuses: { type: 'object', additionalProperties: { type: 'string' } } },
+          required: ['depStatuses'],
+        }, agentType: 'general-purpose' }
+      );
+      const { state: requeuedState, requeued } = requeueSkippedWithMetDeps(state, skippedRead.depStatuses || {});
+      if (requeued.length > 0) {
+        state = requeuedState;
+        for (const r of requeued) await appendJournal({ event: 'requeue', storyKey: r.story, reason: r.reason });
+        log(`Re-queueing ${requeued.length} skipped story(ies) whose deps are now met (front of queue; ${state.skipped.length} still skipped)`);
+        const requeueHalt = await persistOrHalt(state);
+        if (requeueHalt) return requeueHalt;
+      }
+    }
+  }
   const sk = state.storyQueue[0];
   state.iterationCount++;
 
