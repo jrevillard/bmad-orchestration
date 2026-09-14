@@ -228,3 +228,38 @@ test('both workflow scripts parse after stripping the top-level return', () => {
     }
   }
 });
+
+// guard: orchestrate-helper.sh `read-status` must fetch origin/<baseBranch>
+// BEFORE reading the file, and fall back to `cat` only on remote-ref failure.
+// A naive `cat` first would re-introduce the stale-prd-worktree bug (every
+// merge's in-progress sprint-status commits land on origin, not the local
+// working tree — until something fetches, the working tree shows backlog).
+//
+// The old `all-read` subcommand had `open(sp).read()` with no fetch — the
+// guard forbids that pattern AND any future variant that skips the fetch.
+test('guard: read-status helper fetches origin before reading the file', () => {
+  const HELPER = readFileSync(join(__dirname, '../../skills/bmad-prd-orchestrate/scripts/orchestrate-helper.sh'), 'utf8');
+  // The fetch line must reference both the prdWorktreePath flag ($PRDW) and
+  // the baseBranch flag ($BASE). Both are part of the new signature.
+  assert.match(HELPER, /git\s+-C\s+"\$\{?PRDW"?\s+fetch\s+origin\s+"\$\{?BASE"?/,
+    'read-status must `git fetch origin <baseBranch>` inside the prd worktree before any read');
+  // Authoritative read via `git show origin/<baseBranch>:<rel>` must come
+  // AFTER the fetch (within the same subcommand body). Read-order matters:
+  // the fetch refreshes origin/<BASE>, then the show reads from it.
+  const fetchIdx = HELPER.search(/git\s+-C\s+"\$\{?PRDW"?\s+fetch/);
+  const showIdx = HELPER.search(/git\s+-C\s+"\$\{?PRDW"?\s+show\s+"?origin\/\$\{?BASE\}?:/);
+  assert.ok(fetchIdx >= 0 && showIdx >= 0 && fetchIdx < showIdx,
+    '`git show origin/<baseBranch>:path` must come AFTER the fetch in the script body');
+  // Fallback to `cat` is allowed, but only on the show failure path (the
+  // `2>/dev/null ||` makes the fallback structural, not a default).
+  assert.match(HELPER, /2>\/dev\/null\s*\|\|\s*cat/,
+    'fallback to `cat` must be on the show failure path (`2>/dev/null || cat`)');
+  // Forbid the old stale-read pattern: any `open(sp)` reading the file
+  // directly, with no fetch upstream, would re-open the bug.
+  assert.doesNotMatch(HELPER, /open\s*\(\s*sp\s*\)/i,
+    '`open(sp).read()` reads the stale working tree — never reintroduce it without the fetch');
+  // The old `all-read` subcommand must be gone (it returned parsed JSON via
+  // python and was the original source of the bug).
+  assert.doesNotMatch(HELPER, /all-read/,
+    'all-read subcommand has been removed; read-status is the sole entry point');
+});

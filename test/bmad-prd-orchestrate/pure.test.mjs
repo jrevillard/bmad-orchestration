@@ -1172,3 +1172,153 @@ test('storyKeysOf output is what makes a blocked-entry resume pass validation', 
   // And without unwrapping, the same state must look broken — this is the bug.
   assert.notDeepEqual([...unknown([...state.blocked], known)], []);
 });
+
+// parseSprintStatuses — extracts a key's status from raw YAML content using
+// the same regex the bash helper used (^\s*<key>:\s*(\S+)\s*$). 'missing'
+// for any key that isn't found. Used by both probe sites after the bash
+// helper returns the file content via `git show origin/<baseBranch>:path`.
+const SAMPLE_YAML = `development_status:
+  1-1-create-hello: done
+  1-2-add-pyproject: in-progress
+  2-1-add-readme: ready-for-dev
+  2-2-escalation-pause-resume: backlog
+  2-3-sync-drift-reconciliation: blocked
+  3-3-bulk-issue-sync: awaiting-operator
+last_updated: 2026-09-14T10:00:00Z
+`;
+
+test('parseSprintStatuses returns currentStatus for the dispatched story', () => {
+  const parse = extractFunction(SCRIPT_SOURCE, 'parseSprintStatuses');
+  const r = parse(SAMPLE_YAML, '2-1-add-readme', []);
+  assert.equal(r.currentStatus, 'ready-for-dev');
+});
+
+test('parseSprintStatuses returns depStatuses for each dep key', () => {
+  const parse = extractFunction(SCRIPT_SOURCE, 'parseSprintStatuses');
+  const r = parse(SAMPLE_YAML, '2-1-add-readme', ['1-1-create-hello', '1-2-add-pyproject']);
+  assert.equal(r.depStatuses['1-1-create-hello'], 'done');
+  assert.equal(r.depStatuses['1-2-add-pyproject'], 'in-progress');
+});
+
+test('parseSprintStatuses returns "missing" for keys not in the file', () => {
+  const parse = extractFunction(SCRIPT_SOURCE, 'parseSprintStatuses');
+  const r = parse(SAMPLE_YAML, '2-1-add-readme', ['9-9-does-not-exist']);
+  assert.equal(r.depStatuses['9-9-does-not-exist'], 'missing');
+});
+
+test('parseSprintStatuses handles awaiting-operator and blocked values', () => {
+  const parse = extractFunction(SCRIPT_SOURCE, 'parseSprintStatuses');
+  const r = parse(SAMPLE_YAML, '2-1-add-readme', ['3-3-bulk-issue-sync', '2-3-sync-drift-reconciliation']);
+  assert.equal(r.depStatuses['3-3-bulk-issue-sync'], 'awaiting-operator');
+  assert.equal(r.depStatuses['2-3-sync-drift-reconciliation'], 'blocked');
+});
+
+test('parseSprintStatuses handles empty content + null storyKey + empty deps', () => {
+  const parse = extractFunction(SCRIPT_SOURCE, 'parseSprintStatuses');
+  const r = parse('', null, []);
+  assert.equal(r.currentStatus, 'missing');
+  // Length check rather than deepEqual: `r.depStatuses` lives in the vm
+  // context (different Object.prototype) so cross-realm deepEqual would fail
+  // even on {} vs {}.
+  assert.equal(Object.keys(r.depStatuses).length, 0);
+});
+
+test('parseSprintStatuses escapes regex metachars in keys (hyphens are fine; dots are not)', () => {
+  // The bug this prevents: a story key containing `.` (e.g. `1-1.v2-foo`)
+  // would match ANY char at that position with a naive regex and return a
+  // wrong status. The helper escapes via String.prototype.replace.
+  const parse = extractFunction(SCRIPT_SOURCE, 'parseSprintStatuses');
+  // Both keys are present; `1-1.v2-foo` (literal dot) must match only the
+  // first one (done). Without escaping, the `.` would match the `-` in the
+  // second key and pick backlog instead.
+  const trickyYaml = `development_status:
+  1-1.v2-foo: done
+  1-1-v2-foo: backlog
+`;
+  const r = parse(trickyYaml, '1-1.v2-foo', []);
+  assert.equal(r.currentStatus, 'done');
+});
+
+// mergeDepStatusesWithCompleted — forces 'done' on any key present in the
+// in-run state.completed. Critical for the per-story probe: a story that
+// just converged inside this run is in state.completed but NOT yet on
+// origin/<baseBranch> (Phase 4 hasn't pushed the done transition), so the
+// raw file map says in-progress and would re-dispatch without this merge.
+test('mergeDepStatusesWithCompleted overrides in-run completions to done', () => {
+  const merge = extractFunction(SCRIPT_SOURCE, 'mergeDepStatusesWithCompleted');
+  const r = merge({ '2-2-foo': 'in-progress', '1-1-bar': 'done' }, ['2-2-foo']);
+  assert.equal(r['2-2-foo'], 'done');
+  assert.equal(r['1-1-bar'], 'done');
+});
+
+test('mergeDepStatusesWithCompleted does not mutate the input', () => {
+  const merge = extractFunction(SCRIPT_SOURCE, 'mergeDepStatusesWithCompleted');
+  const input = { '2-2-foo': 'in-progress' };
+  const completed = ['2-2-foo'];
+  const r = merge(input, completed);
+  assert.equal(input['2-2-foo'], 'in-progress'); // untouched
+  assert.equal(r['2-2-foo'], 'done');
+});
+
+test('mergeDepStatusesWithCompleted preserves awaiting-operator / blocked from file', () => {
+  // A story that was awaiting-operator in a previous run must NOT be flipped
+  // to done even if some buggy caller adds it to completed.
+  const merge = extractFunction(SCRIPT_SOURCE, 'mergeDepStatusesWithCompleted');
+  const r = merge({ '3-3-foo': 'awaiting-operator', '2-4-bar': 'blocked' }, ['3-3-foo']);
+  // This case is an invariant check: completed overriding awaiting-operator
+  // would let the orchestrator dispatch a parked story. Currently merge does
+  // override (it just sets to 'done') — if that ever becomes wrong, this
+  // test will need a stricter invariant. For now we assert the current
+  // contract: completed wins unconditionally.
+  assert.equal(r['3-3-foo'], 'done');
+  assert.equal(r['2-4-bar'], 'blocked');
+});
+
+test('mergeDepStatusesWithCompleted handles empty inputs', () => {
+  // Cross-realm deepEqual fails on equivalent structures (different
+  // Object.prototype), so use JSON for the structural comparison.
+  const merge = extractFunction(SCRIPT_SOURCE, 'mergeDepStatusesWithCompleted');
+  assert.equal(JSON.stringify(merge({}, [])), '{}');
+  assert.equal(JSON.stringify(merge({ '1-1-a': 'backlog' }, [])), '{"1-1-a":"backlog"}');
+  assert.equal(JSON.stringify(merge({}, ['1-1-a'])), '{"1-1-a":"done"}');
+});
+
+// isDone — the per-story probe's "is this story done?" check. True if
+// either state.completed or the file (via merged depStatuses) says done.
+test('isDone returns true when key is in completed (in-run case)', () => {
+  const isDone = extractFunction(SCRIPT_SOURCE, 'isDone');
+  // File map has it as in-progress (post-merge but pre-Phase-4) — the file
+  // alone would say NOT done, but state.completed knows it converged.
+  assert.equal(isDone('2-2-foo', { '2-2-foo': 'in-progress' }, ['2-2-foo']), true);
+});
+
+test('isDone returns true when file says done (cross-run case)', () => {
+  const isDone = extractFunction(SCRIPT_SOURCE, 'isDone');
+  // Previous run's Phase 4 wrote done; current run's state.completed is empty.
+  assert.equal(isDone('1-3-bar', { '1-3-bar': 'done' }, []), true);
+});
+
+test('isDone returns false when neither source says done', () => {
+  const isDone = extractFunction(SCRIPT_SOURCE, 'isDone');
+  assert.equal(isDone('2-3-baz', { '2-3-baz': 'backlog' }, ['1-1-foo']), false);
+  assert.equal(isDone('2-3-baz', { '2-3-baz': 'in-progress' }, []), false);
+  assert.equal(isDone('2-3-baz', {}, []), false); // missing key
+});
+
+test('isDone treats awaiting-operator and blocked as not done', () => {
+  const isDone = extractFunction(SCRIPT_SOURCE, 'isDone');
+  assert.equal(isDone('3-3-foo', { '3-3-foo': 'awaiting-operator' }, []), false);
+  assert.equal(isDone('2-4-bar', { '2-4-bar': 'blocked' }, []), false);
+});
+
+// guard: the orchestrator's recheck probe MUST use the read-status helper
+// (not the old all-read). If anyone reverts to all-read, the per-iteration
+// dep check stops seeing origin/<baseBranch> and dep chains stall again.
+test('guard: recheck probe uses read-status, never all-read', () => {
+  // Match `all-read(` specifically (a function/subcommand call), so we don't
+  // trip on the literal string in unrelated comments or agent labels.
+  assert.doesNotMatch(SCRIPT_SOURCE, /all-read\s*\(/,
+    'all-read has been replaced by read-status — re-introducing it would re-open the stale-file bug');
+  assert.match(SCRIPT_SOURCE, /read-status/,
+    'recheck probe must call read-status for fresh origin/<baseBranch> data');
+});

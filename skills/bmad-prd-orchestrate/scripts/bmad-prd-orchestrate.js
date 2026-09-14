@@ -182,6 +182,49 @@ function findUnmetDeps(deps, depStatuses) {
   return deps.filter(d => (depStatuses || {})[d] !== 'done');
 }
 
+// parseSprintStatuses(content, storyKey, deps) → { currentStatus, depStatuses }
+// Extracts statuses from raw sprint-status.yaml content, mirroring the regex
+// the bash helper used (`^\s*<key>:\s*(\S+)\s*$`). 'missing' for any
+// key that isn't found in the file — callers treat that as not-done.
+// Pure: takes a string, returns an object, no side effects. Bash is the
+// executor (git fetch + git show); JS owns the parse so it can be unit-tested
+// without a real repo (test/pure.test.mjs).
+function parseSprintStatuses(content, storyKey, deps) {
+  const getStatus = (key) => {
+    const escaped = String(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = (content || '').match(new RegExp(`^\\s*${escaped}:\\s*(\\S+)\\s*$`, 'm'));
+    return m ? m[1] : 'missing';
+  };
+  return {
+    currentStatus: storyKey ? getStatus(storyKey) : 'missing',
+    depStatuses: Object.fromEntries((deps || []).map(d => [d, getStatus(d)])),
+  };
+}
+
+// mergeDepStatusesWithCompleted(depStatuses, completed) → new depStatuses map
+// where any key present in `completed` is forced to 'done'. Combines the
+// in-run source of truth (state.completed — fresh, updated synchronously by
+// converge on return) with the cross-run source (sprint-status on
+// origin/<baseBranch> — fresh post-merge but only updated by Phase 4, so it
+// misses in-run completions that haven't reached Phase 4 yet). Whichever says
+// 'done' wins; either is enough. Pure: takes two inputs, returns a new
+// object, no mutation.
+function mergeDepStatusesWithCompleted(depStatuses, completed) {
+  const out = { ...(depStatuses || {}) };
+  for (const k of (completed || [])) {
+    out[k] = 'done';
+  }
+  return out;
+}
+
+// isDone(key, depStatuses, completed) → boolean. Shortcut for the common
+// "is this story done?" check used by the per-story probe. True if either
+// source says done; false otherwise (backlog/in-progress/missing).
+function isDone(key, depStatuses, completed) {
+  if ((completed || []).includes(key)) return true;
+  return (depStatuses || {})[key] === 'done';
+}
+
 // requeueSkippedWithMetDeps(state, depStatuses) → { state, requeued: [{story, reason}] }
 //
 // A story that landed in skipped[] because a dep was unmet at the time sat there
@@ -193,7 +236,7 @@ function findUnmetDeps(deps, depStatuses) {
 // Pure: takes the merged sprint-status map, returns a new state with the eligible
 // stories unshifted at the front of storyQueue (they were waiting longest) and the
 // rest of skipped[] preserved. No dispatch here — the caller dispatches the single
-// all-read once (only when skipped is non-empty, to keep the common case free).
+// read-status once (only when skipped is non-empty, to keep the common case free).
 // Test in test/pure.test.mjs.
 function requeueSkippedWithMetDeps(state, depStatuses) {
   const requeued = [];
@@ -1140,26 +1183,34 @@ while (state.storyQueue.length > 0) {
   // loop's next iteration will read it as the new sk; the unmet-deps check will pass since
   // the requeue required all deps met, and the story will dispatch, not re-skip.)
   const sk = state.storyQueue[0];
-  // Re-evaluate skipped stories whose deps are now met. Single all-read (only when
+  // Re-evaluate skipped stories whose deps are now met. Single read-status (only when
   // skipped is non-empty, so the common case is zero extra work). The bash helper's
   // deps arg accepts a comma-separated list of any keys, so we pass the union of every
   // skipped story's deps and get the lot in one call.
   if (state.skipped && state.skipped.length > 0) {
     const skippedDeps = [...new Set(state.skipped.flatMap(i => i.deps || []))];
     if (skippedDeps.length > 0) {
-      const skippedReadCmd = `"${args_.helpersDir || ''}orchestrate-helper.sh" all-read '${setup.sprintStatusPath}' '${sk}' '${skippedDeps.join(',')}'`;
+      const skippedReadCmd = `"${args_.helpersDir || ''}orchestrate-helper.sh" read-status '${setup.sprintStatusPath}' '${setup.prdWorktreePath}' '${setup.baseBranch}'`;
       const skippedRead = await agent(
-        `Run this exact bash command. Return its stdout verbatim. Do NOT modify, summarize, or diagnose.
+        `Run this exact bash command. Return its stdout verbatim in the 'content' field. Do NOT modify, summarize, or diagnose.
 
 COMMAND:
 ${skippedReadCmd}`,
         { label: `skipped-recheck-${state.iterationCount}`, phase: 'Execute', schema: {
           type: 'object',
-          properties: { depStatuses: { type: 'object', additionalProperties: { type: 'string' } } },
-          required: ['depStatuses'],
+          properties: { content: { type: 'string' } },
+          required: ['content'],
         }, agentType: 'general-purpose' }
       );
-      const { state: requeuedState, requeued } = requeueSkippedWithMetDeps(state, skippedRead.depStatuses || {});
+      // parseSprintStatuses takes a content-only payload (no deps arg — the
+      // deps list was previously built into the bash helper, now we pass them
+      // explicitly so the parse stays pure and testable).
+      const fileStatuses = parseSprintStatuses(skippedRead.content || '', null, skippedDeps).depStatuses;
+      // Merge with state.completed: in-run completions aren't on origin/<baseBranch>
+      // yet (Phase 4 hasn't fired), so without this merge the recheck sees a
+      // just-converged story as backlog and refuses to un-skip its dependents.
+      const mergedStatuses = mergeDepStatusesWithCompleted(fileStatuses, state.completed);
+      const { state: requeuedState, requeued } = requeueSkippedWithMetDeps(state, mergedStatuses);
       if (requeued.length > 0) {
         state = requeuedState;
         for (const r of requeued) await appendJournal({ event: 'requeue', storyKey: r.story, reason: r.reason });
@@ -1240,23 +1291,26 @@ Capture { issue_id } from stdout. If the Skill reports the issue was not found, 
   // per loop iter. The helper does the YAML grep, agent is transport.
   const inferredEdge = planResult.inferred.find(e => e.story === sk);
   const deps = inferredEdge ? inferredEdge.depends_on : [];
-  const bashReadCmd = `"${args_.helpersDir || ''}orchestrate-helper.sh" all-read '${setup.sprintStatusPath}' '${sk}' '${deps.join(',')}'`;
+  const bashReadCmd = `"${args_.helpersDir || ''}orchestrate-helper.sh" read-status '${setup.sprintStatusPath}' '${setup.prdWorktreePath}' '${setup.baseBranch}'`;
   const allRead = await agent(
-    `Run this exact bash command. Return its stdout verbatim. Do NOT modify, summarize, or diagnose.
+    `Run this exact bash command. Return its stdout verbatim in the 'content' field. Do NOT modify, summarize, or diagnose.
 
 COMMAND:
 ${bashReadCmd}`,
-    { label: `all-read-${sk}`, phase: 'Execute', schema: {
+    { label: `read-status-${sk}`, phase: 'Execute', schema: {
       type: 'object',
-      properties: {
-        currentStatus: { type: 'string' },
-        depStatuses: { type: 'object', additionalProperties: { type: 'string' } },
-      },
-      required: ['currentStatus', 'depStatuses'],
+      properties: { content: { type: 'string' } },
+      required: ['content'],
     }, agentType: 'general-purpose' }
   );
-  const currentStatus = allRead.currentStatus;
-  const depStatusCheck = { statuses: allRead.depStatuses };
+  const parsedStatuses = parseSprintStatuses(allRead.content || '', sk, deps);
+  const currentStatus = parsedStatuses.currentStatus;
+  // Merge state.completed over the file statuses: in-run completions aren't
+  // on origin/<baseBranch> until Phase 4 pushes the done transition, so
+  // without this override the per-story probe sees just-converged stories
+  // as in-progress and re-dispatches them (wasted build). The file still
+  // wins for awaiting-operator / blocked / cross-run completions.
+  const depStatusCheck = { statuses: mergeDepStatusesWithCompleted(parsedStatuses.depStatuses, state.completed) };
 
   // awaiting-operator parking (do NOT execute — park in awaitingOperator[], continue)
   if (currentStatus === 'awaiting-operator') {
@@ -1268,10 +1322,12 @@ ${bashReadCmd}`,
     continue;
   }
 
-  // already done: skip re-execution (defensive — covers races with external status writes)
+  // already done: skip re-execution (defensive — covers races with external status writes
+  // and cross-run completions where Phase 4 of a previous run wrote done).
+  // Cross-run completion case: state.completed doesn't have it but the file does.
   if (currentStatus === 'done') {
     log(`Story ${sk} already done per sprint-status; marking completed`)
-    state.completed.push(sk);
+    if (!state.completed.includes(sk)) state.completed.push(sk);
     state = removeFromState(state, sk);
     state.storyQueue.shift();
     const doneHalt = await persistOrHalt(state);
@@ -1279,11 +1335,10 @@ ${bashReadCmd}`,
     continue;
   }
 
-  // Dep check: a dep is "met" when sprint-status reports it 'done'. Local
-  // state.completed only tracks THIS run's completions — cross-run deps
-  // (story completed in a previous orchestrate session) would falsely fail
-  // if checked against state.completed alone. Sprint-status is the ground
-  // truth for the entire PRD across all runs.
+  // Dep check: a dep is "met" when EITHER sprint-status on origin/<baseBranch>
+  // reports it 'done' OR state.completed contains it. Sprint-status is the
+  // cross-run source (Phase 4 of a previous session wrote done there);
+  // state.completed is the in-run source (converge updated it on return).
   const unmetDeps = findUnmetDeps(deps, depStatusCheck.statuses);
   if (unmetDeps.length > 0) {
     log(`Story ${sk} has unmet deps: ${unmetDeps.join(', ')}; skipping`)
