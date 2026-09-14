@@ -26,8 +26,8 @@ import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const ORCHESTRATOR_PATH = join(__dirname, '../scripts/bmad-prd-orchestrate.js');
-const CONVERGE_PATH = join(__dirname, '../../bmad-build-converge/scripts/bmad-build-converge.js');
+const ORCHESTRATOR_PATH = join(__dirname, '../../skills/bmad-prd-orchestrate/scripts/bmad-prd-orchestrate.js');
+const CONVERGE_PATH = join(__dirname, '../../skills/bmad-build-converge/scripts/bmad-build-converge.js');
 
 function countMatches(source, regex) {
   regex.lastIndex = 0;
@@ -180,7 +180,7 @@ test('integration: BOTH scripts end with top-level `return await main();` (not b
 // ============================================================================
 
 test('guard: no platform CLI or tracker API anywhere in this repo', () => {
-  const skillDir = join(__dirname, '../..');           // skills/
+  const skillDir = join(__dirname, '../../skills');   // tests live at repo root now
   const targets = [];
   for (const s of ['bmad-prd-orchestrate', 'bmad-build-converge']) {
     targets.push(join(skillDir, s, 'scripts', `${s}.js`));

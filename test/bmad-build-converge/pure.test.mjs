@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path';
 import vm from 'node:vm';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCRIPT_PATH = join(__dirname, '../scripts/bmad-build-converge.js');
+const SCRIPT_PATH = join(__dirname, '../../skills/bmad-build-converge/scripts/bmad-build-converge.js');
 
 /**
  * Extract a top-level `const NAME = (args) => { ... }` (arrow) or

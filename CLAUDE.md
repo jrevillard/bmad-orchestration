@@ -55,13 +55,12 @@ re-running:
 TEST_WT=/home/jerome/git_projects/bmad-test-tracking/.claude/worktrees/prd-test-loop-v2
 cp skills/bmad-prd-orchestrate/scripts/bmad-prd-orchestrate.js "$TEST_WT/.agents/skills/bmad-prd-orchestrate/scripts/"
 cp skills/bmad-build-converge/scripts/bmad-build-converge.js   "$TEST_WT/.agents/skills/bmad-build-converge/scripts/"
-# tests too, so the guard tests run against the deployed copy:
-mkdir -p "$TEST_WT/.agents/skills/bmad-prd-orchestrate/test"
-cp skills/bmad-prd-orchestrate/test/*.mjs "$TEST_WT/.agents/skills/bmad-prd-orchestrate/test/"
 ```
 
-Only the **scripts** (and optionally tests) need deploying — the `docs/` diagrams are
-developer references, not consumed at runtime.
+Only the **scripts** need deploying — the `docs/` diagrams are developer references,
+not consumed at runtime, and the `test/` folder lives at the repo root (NOT under
+`skills/`) so `npx skills add` does not ship it to consumers. Run `node --test` against
+the source copy before deploying.
 
 ## Pre-commit check
 

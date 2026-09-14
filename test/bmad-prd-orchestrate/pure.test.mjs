@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path';
 import vm from 'node:vm';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCRIPT_PATH = join(__dirname, '../scripts/bmad-prd-orchestrate.js');
+const SCRIPT_PATH = join(__dirname, '../../skills/bmad-prd-orchestrate/scripts/bmad-prd-orchestrate.js');
 
 /**
  * Extract a top-level `const NAME = (args) => { ... };` (or `function NAME(...)` )
