@@ -19,9 +19,9 @@ Initial public release. Two Skills-as-modules under the module key
 - Helper scripts (`write-state.sh`, `orchestrate-helper.sh`) installed
   per skill in `scripts/`. Passed via `args.helpersDir` so the JS
   finds them regardless of install location.
-- Atomic contract with `bmad-issue-tracking` module — MR/PR operations
-  routed via `Skill: bmad-issue-tracking-sync`. No raw `glab`, `gh`, or
-  tracker HTTP in this repo (enforced by
+- Atomic contract with [`bmad-issue-tracking`](https://github.com/jrevillard/bmad-issue-tracking)
+  module — MR/PR operations routed via `Skill: bmad-issue-tracking-sync`.
+  No raw `glab`, `gh`, or tracker HTTP in this repo (enforced by
   `test/integration.test.mjs`).
 - 168 unit + integration tests covering pure helpers, dispatch
   contracts, and the no-platform-CLI invariant.
@@ -32,7 +32,7 @@ Initial public release. Two Skills-as-modules under the module key
 
 - `skills/bmad-build-converge/scripts/ci-monitor.sh` — was a
   GitLab-specific poll loop that baked consumer config defaults into a
-  generic module. Replaced by `bmad-issue-tracking`'s
+  generic module. Replaced by [`bmad-issue-tracking`](https://github.com/jrevillard/bmad-issue-tracking)'s
   `wait-for-green-ci` atomic.
 - `skills/bmad-prd-orchestrate/scripts/ci-monitor.sh` — same.
 

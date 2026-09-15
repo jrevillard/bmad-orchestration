@@ -11,7 +11,7 @@ Two Skills-as-modules skills under the module key `bmad-orchestration`:
 
 Both skills ship self-contained: the workflow `.js` plus the helper bash scripts (`write-state.sh`, `orchestrate-helper.sh`) live in each skill's `scripts/` folder. Claude Code's Workflow tool reads the JS and dispatches with the `script` parameter; helper paths are passed via `args.helpersDir` so the JS finds them at runtime regardless of install location.
 
-Neither skill calls a platform CLI or a tracker API directly. `glab`, `gh`, and the tracker/pipeline HTTP calls belong to the `bmad-issue-tracking` module, which owns that abstraction; this repo reaches them only through `Skill: bmad-issue-tracking-sync` or by executing one of the module's workflow atomics (its CI wait, its issue-comment atomic). A `test/integration.test.mjs` guard enforces it across both scripts and both `scripts/*.sh`.
+Neither skill calls a platform CLI or a tracker API directly. `glab`, `gh`, and the tracker/pipeline HTTP calls belong to the [`bmad-issue-tracking`](https://github.com/jrevillard/bmad-issue-tracking) module, which owns that abstraction; this repo reaches them only through `Skill: bmad-issue-tracking-sync` or by executing one of the module's workflow atomics (its CI wait, its issue-comment atomic). A `test/integration.test.mjs` guard enforces it across both scripts and both `scripts/*.sh`.
 
 ## Install
 
@@ -33,7 +33,7 @@ npx skills add /absolute/path/to/bmad-orchestration
 
 The orchestration skills require `_bmad/custom/issue-tracking.yaml` to exist in the consumer project. That file is created by the `bmad-issue-tracking-setup` skill. As of this release:
 
-- **`bmad-issue-tracking` v3.0.0 minimum** (BMM 6.12+ with flat `_bmad/{method,toolbox}/` layout).
+- **[`bmad-issue-tracking`](https://github.com/jrevillard/bmad-issue-tracking) v3.0.0 minimum** (BMM 6.12+ with flat `_bmad/{method,toolbox}/` layout).
 
 `bmad-issue-tracking` v2.x is **not supported** — its `_bmad/{bmm,bmb,...}/` legacy layout is incompatible with the v3.x file shape this module reads. If your project still has v2.x installed, upgrade before installing this module.
 

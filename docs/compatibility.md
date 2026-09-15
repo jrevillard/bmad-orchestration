@@ -19,7 +19,7 @@ phase with a diagnostic.
 
 | Component | Version | Why |
 |---|---|---|
-| `bmad-issue-tracking` | **v3.0.0 minimum** (BMM 6.12+ with flat `_bmad/{method,toolbox}/` layout) | Provides `_bmad/custom/issue-tracking.yaml`. Without this file, the orchestrator cannot read platform/host/project and halts on Setup. `bmad-issue-tracking` v2.x is **not supported** — its `_bmad/{bmm,bmb,...}/` legacy layout is incompatible with the v3.x file shape this module reads. |
+| [`bmad-issue-tracking`](https://github.com/jrevillard/bmad-issue-tracking) | **v3.0.0 minimum** (BMM 6.12+ with flat `_bmad/{method,toolbox}/` layout) | Provides `_bmad/custom/issue-tracking.yaml`. Without this file, the orchestrator cannot read platform/host/project and halts on Setup. `bmad-issue-tracking` v2.x is **not supported** — its `_bmad/{bmm,bmb,...}/` legacy layout is incompatible with the v3.x file shape this module reads. |
 | `bmad-build-auto` | latest | The dev primitive called in a loop by `bmad-build-converge` until convergence. |
 | `bmad-sprint-planning` | latest (orchestrator only) | Phase 4 invokes `sprint_plan.py generate --set <key>=done` to advance the PRD branch to its final state. |
 | `bmad-retrospective` | latest (orchestrator, `--retro` only) | Per-epic retrospective — opt-in via the orchestrator's first-run question. |
@@ -39,7 +39,7 @@ phase with a diagnostic.
 | GitHub | `Skill: bmad-issue-tracking-sync` + `bmad-issue-tracking/common/` atomics | GitHub REST via `gh` |
 
 This module **never calls `glab`, `gh`, or any tracker HTTP endpoint directly**.
-That abstraction belongs to `bmad-issue-tracking`. Enforced by
+That abstraction belongs to [`bmad-issue-tracking`](https://github.com/jrevillard/bmad-issue-tracking). Enforced by
 `test/integration.test.mjs` (see the `guard: no platform CLI or tracker API
 anywhere in this repo` test).
 
