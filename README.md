@@ -1,5 +1,7 @@
 # BMad Orchestration
 
+> **Claude Code only.** This module's workflow scripts depend on Claude Code's Workflow tool globals (`agent`, `phase`, `log`, `workflow`, `args`, `writeState`, `appendJournal`) and the slash-command surface (`/bmad-prd-orchestrate`, `/bmad-build-converge`). It will not run on any other tool. If you are not on Claude Code, this module is not for you.
+
 Two Skills-as-modules skills under the module key `bmad-orchestration`:
 
 | Skill | Role |
@@ -19,7 +21,7 @@ In a project that already has BMad set up:
 npx skills add github:jrevillard/bmad-orchestration
 ```
 
-Installs both skills under `.agents/skills/` (symlinked into Claude Code's skill discovery).
+Installs both skills under `.agents/skills/`. Claude Code discovers them and exposes `/bmad-prd-orchestrate` + `/bmad-build-converge` as slash commands.
 
 For local development against this repo:
 
@@ -27,16 +29,13 @@ For local development against this repo:
 npx skills add /absolute/path/to/bmad-orchestration
 ```
 
-After install, two slash commands become available: `/bmad-prd-orchestrate` and `/bmad-build-converge`.
-
 ## Prerequisites (consumer project)
 
-The orchestration skills have **no hard BMM floor** — they only require that `_bmad/custom/issue-tracking.yaml` exists in the consumer. That file is created by the `bmad-issue-tracking-setup` skill, so the effective compat tracks whichever version of that module the consumer has installed:
+The orchestration skills require `_bmad/custom/issue-tracking.yaml` to exist in the consumer project. That file is created by the `bmad-issue-tracking-setup` skill. As of this release:
 
-- `bmad-issue-tracking` v2.x → writes the YAML on BMM 6.11+ (legacy `_bmad/{bmm,bmb,...}/` layout)
-- `bmad-issue-tracking` v3.x → writes the YAML on BMM 6.12+ (flat `_bmad/{method,toolbox}/` layout)
+- **`bmad-issue-tracking` v3.0.0 minimum** (BMM 6.12+ with flat `_bmad/{method,toolbox}/` layout).
 
-Install `bmad-issue-tracking` first (v2.x for BMM 6.11, v3.x for BMM 6.12+), then install these orchestration skills.
+`bmad-issue-tracking` v2.x is **not supported** — its `_bmad/{bmm,bmb,...}/` legacy layout is incompatible with the v3.x file shape this module reads. If your project still has v2.x installed, upgrade before installing this module.
 
 Other upstream BMad skills required at runtime:
 - `bmad-sprint-planning` (orchestrator-only) — for `sprint_plan.py generate --set <key>=done`

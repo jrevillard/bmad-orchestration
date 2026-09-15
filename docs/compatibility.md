@@ -19,11 +19,17 @@ phase with a diagnostic.
 
 | Component | Version | Why |
 |---|---|---|
-| `bmad-issue-tracking` | **v2.x** for BMM 6.11+ (legacy `_bmad/{bmm,bmb,...}/` layout) OR **v3.x** for BMM 6.12+ (flat `_bmad/{method,toolbox}/` layout) | Provides `_bmad/custom/issue-tracking.yaml`. Without this file, the orchestrator cannot read platform/host/project and halts on Setup. |
+| `bmad-issue-tracking` | **v3.0.0 minimum** (BMM 6.12+ with flat `_bmad/{method,toolbox}/` layout) | Provides `_bmad/custom/issue-tracking.yaml`. Without this file, the orchestrator cannot read platform/host/project and halts on Setup. `bmad-issue-tracking` v2.x is **not supported** — its `_bmad/{bmm,bmb,...}/` legacy layout is incompatible with the v3.x file shape this module reads. |
 | `bmad-build-auto` | latest | The dev primitive called in a loop by `bmad-build-converge` until convergence. |
 | `bmad-sprint-planning` | latest (orchestrator only) | Phase 4 invokes `sprint_plan.py generate --set <key>=done` to advance the PRD branch to its final state. |
 | `bmad-retrospective` | latest (orchestrator, `--retro` only) | Per-epic retrospective — opt-in via the orchestrator's first-run question. |
 | `glab` CLI | any recent | GitLab authentication against the configured host. |
+
+## Runtime
+
+| Component | Required | Why |
+|---|---|---|
+| **Claude Code** | required (only) | The workflow scripts depend on Claude Code's Workflow tool globals (`agent`, `phase`, `log`, `workflow`, `args`, `writeState`, `appendJournal`) and the slash-command surface. They will not run on any other tool. |
 
 ## Platform coverage
 
@@ -37,11 +43,11 @@ That abstraction belongs to `bmad-issue-tracking`. Enforced by
 `test/integration.test.mjs` (see the `guard: no platform CLI or tracker API
 anywhere in this repo` test).
 
-## Workflow runtime
+## Workflow runtime globals
 
-This module's `.js` files are executed by Claude Code's Workflow tool. The
-runtime provides the following globals; scripts may not import Node built-ins
-to replace them:
+Claude Code's Workflow tool provides these globals to scripts in this module.
+Scripts may not import Node built-ins to replace them — the runtime is the
+only supported environment.
 
 | Global | Purpose |
 |---|---|
