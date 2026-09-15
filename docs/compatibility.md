@@ -30,7 +30,7 @@ These are **not** module dependencies — they are BMad's own skills and CLIs th
 | Component | Why |
 |---|---|
 | BMad (BMM 6.12+ same floor as `bmad-issue-tracking` v3.x) | Provides `_bmad-output/{planning,implementation}-artifacts/`. The orchestration skills run on top of BMad. |
-| `bmad-sprint-planning` | Orchestrator's Phase 4 invokes `sprint_plan.py generate --set <key>=done`. |
+| `bmad-sprint-planning` (skill) | This skill ships `sprint_plan.py` in its `scripts/` folder. The orchestrator's Phase 4 invokes that script directly via `python3` (filesystem path, not `Skill:` routing) to write the done transition into `sprint-status.yaml`. |
 | `bmad-build-auto` | Converge loops this until the story converges. |
 | `bmad-retrospective` | Orchestrator's `--retro` mode invokes it per epic. |
 | `glab` CLI (GitLab) | Authenticated against the configured host. GitHub users go through the same `bmad-issue-tracking-sync` routing via `gh`. |
@@ -102,3 +102,11 @@ reason at Setup — not a generic error.
 - **Multi-tenant / per-tenant tracker configuration** — the orchestrator
   reads `_bmad/custom/issue-tracking.yaml` once at setup and uses it for
   the whole run. Re-configuring mid-run is not supported.
+- **`sprint_plan.py` story-level done only.** The story-level
+  `--set <key>=done` transitions in `bmad-sprint-planning/scripts/sprint_plan.py`
+  work (the `advanced` counter in the run journal verifies it). The
+  epic-level advancement and the spec→ready-for-dev upgrade inside
+  `sprint_plan.py` silently no-op because of a filename mismatch with
+  this module's producer format (`spec-<id>-<slug>.md` vs
+  `f"{key}.md"`). Fixing belongs upstream in `bmad-sprint-planning`;
+  this module intentionally does not patch around it.

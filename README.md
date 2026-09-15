@@ -43,7 +43,7 @@ This module declares **one** upstream module dependency: `bmad-issue-tracking`. 
 The orchestrator and converge scripts call the following BMad skills at runtime. They must exist in the consumer's BMad install — they are **not** module dependencies of `bmad-orchestration`; they are BMad's own skills, and BMad is what `bmad-issue-tracking` (and these orchestration skills) run on top of.
 
 - **BMad installed in the consumer project** — BMM 6.12+ (same floor as `bmad-issue-tracking` v3.x).
-- `bmad-sprint-planning` — orchestrator's Phase 4 invokes `sprint_plan.py generate --set <key>=done` to advance the PRD branch to its final state.
+- `bmad-sprint-planning` — the skill ships `sprint_plan.py` in its `scripts/` folder. Orchestrator's Phase 4 invokes that script directly (`python3 .../bmad-sprint-planning/scripts/sprint_plan.py generate --set <key>=done`) to mark converged stories as done in `sprint-status.yaml`. The story-level done transition works. Epic-level advancement and spec→ready-for-dev upgrade inside `sprint_plan.py` have a known filename mismatch with this module's producer format — see `Known limitations`.
 - `bmad-build-auto` — converge loops this until the story converges.
 - `bmad-retrospective` — orchestrator's `--retro` mode invokes it per epic.
 - `glab` CLI (GitLab) authenticated against the configured host. (GitHub users go through the same `bmad-issue-tracking-sync` routing via `gh`.)
@@ -157,6 +157,14 @@ and re-dispatch.
 - **Sprint-status freshness** — first probe after a merge may see the
   pre-merge state; the second iteration re-fetches and corrects.
   Observed in long debug sessions, never in healthy runs.
+- **`bmad-sprint-planning` integration is story-level only.** Phase 4
+  invokes `sprint_plan.py generate --set <key>=done` and the story-level
+  done transition works (verified by the `advanced` counter in the run
+  journal). The epic-level advancement and the spec→ready-for-dev
+  upgrade inside `sprint_plan.py` have a known filename mismatch with
+  this module's producer (`spec-<id>-<slug>.md` vs `f"{key}.md"`) and
+  silently no-op. Fixing it belongs upstream in `bmad-sprint-planning`;
+  this module intentionally does not patch around it.
 
 ## Examples
 
