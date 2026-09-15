@@ -15,15 +15,25 @@ phase with a diagnostic.
 | License | MIT |
 | Both skills share the manifest | yes (`update_source` + `knowledge` byte-identical per the BMad installer rule) |
 
-## Required upstream
+## Module dependency
+
+This module declares **one** upstream module dependency: `bmad-issue-tracking`. Everything else is a runtime requirement of the consumer project, not a module dep.
 
 | Component | Version | Why |
 |---|---|---|
-| [`bmad-issue-tracking`](https://github.com/jrevillard/bmad-issue-tracking) | **v3.0.0 minimum** (BMM 6.12+ with flat `_bmad/{method,toolbox}/` layout) | Provides `_bmad/custom/issue-tracking.yaml`. Without this file, the orchestrator cannot read platform/host/project and halts on Setup. `bmad-issue-tracking` v2.x is **not supported** — its `_bmad/{bmm,bmb,...}/` legacy layout is incompatible with the v3.x file shape this module reads. |
-| `bmad-build-auto` | latest | The dev primitive called in a loop by `bmad-build-converge` until convergence. |
-| `bmad-sprint-planning` | latest (orchestrator only) | Phase 4 invokes `sprint_plan.py generate --set <key>=done` to advance the PRD branch to its final state. |
-| `bmad-retrospective` | latest (orchestrator, `--retro` only) | Per-epic retrospective — opt-in via the orchestrator's first-run question. |
-| `glab` CLI | any recent | GitLab authentication against the configured host. |
+| [`bmad-issue-tracking`](https://github.com/jrevillard/bmad-issue-tracking) | **v3.0.0 minimum** (BMM 6.12+ with flat `_bmad/{method,toolbox}/` layout) | Provides `_bmad/custom/issue-tracking.yaml` and the `bmad-issue-tracking-sync` skill. Without this, the orchestrator halts on Setup. `bmad-issue-tracking` v2.x is **not supported** — its `_bmad/{bmm,bmb,...}/` legacy layout is incompatible with the v3.x file shape this module reads. |
+
+## Runtime requirements (consumer project)
+
+These are **not** module dependencies — they are BMad's own skills and CLIs that the orchestrator / converge scripts invoke at runtime. The consumer project must have them installed.
+
+| Component | Why |
+|---|---|
+| BMad (BMM 6.12+ same floor as `bmad-issue-tracking` v3.x) | Provides `_bmad-output/{planning,implementation}-artifacts/`. The orchestration skills run on top of BMad. |
+| `bmad-sprint-planning` | Orchestrator's Phase 4 invokes `sprint_plan.py generate --set <key>=done`. |
+| `bmad-build-auto` | Converge loops this until the story converges. |
+| `bmad-retrospective` | Orchestrator's `--retro` mode invokes it per epic. |
+| `glab` CLI (GitLab) | Authenticated against the configured host. GitHub users go through the same `bmad-issue-tracking-sync` routing via `gh`. |
 
 ## Runtime
 

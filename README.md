@@ -29,20 +29,24 @@ For local development against this repo:
 npx skills add /absolute/path/to/bmad-orchestration
 ```
 
-## Prerequisites (consumer project)
+## Prerequisites
 
-The orchestration skills require `_bmad/custom/issue-tracking.yaml` to exist in the consumer project. That file is created by the `bmad-issue-tracking-setup` skill. As of this release:
+This module declares **one** upstream module dependency: `bmad-issue-tracking`. Everything else is a runtime requirement of the consumer project, not a module dep.
 
-- **[`bmad-issue-tracking`](https://github.com/jrevillard/bmad-issue-tracking) v3.0.0 minimum** (BMM 6.12+ with flat `_bmad/{method,toolbox}/` layout).
+### Module dependency
 
-`bmad-issue-tracking` v2.x is **not supported** — its `_bmad/{bmm,bmb,...}/` legacy layout is incompatible with the v3.x file shape this module reads. If your project still has v2.x installed, upgrade before installing this module.
+- **[`bmad-issue-tracking`](https://github.com/jrevillard/bmad-issue-tracking) v3.0.0 minimum** (BMM 6.12+ with flat `_bmad/{method,toolbox}/` layout). Provides `_bmad/custom/issue-tracking.yaml` and the `bmad-issue-tracking-sync` skill. Without this, the orchestrator halts on Setup.
+- `bmad-issue-tracking` v2.x is **not supported** — its `_bmad/{bmm,bmb,...}/` legacy layout is incompatible with the v3.x file shape this module reads. If your project still has v2.x installed, upgrade before installing this module.
 
-Other upstream BMad skills required at runtime:
-- `bmad-sprint-planning` (orchestrator-only) — for `sprint_plan.py generate --set <key>=done`
-- `bmad-build-auto` (both) — the dev primitive
-- `bmad-retrospective` (orchestrator, with `--retro`) — per-epic retro trigger
+### Runtime requirements (consumer project)
 
-CLI: `glab` (GitLab) authenticated against the configured host.
+The orchestrator and converge scripts call the following BMad skills at runtime. They must exist in the consumer's BMad install — they are **not** module dependencies of `bmad-orchestration`; they are BMad's own skills, and BMad is what `bmad-issue-tracking` (and these orchestration skills) run on top of.
+
+- **BMad installed in the consumer project** — BMM 6.12+ (same floor as `bmad-issue-tracking` v3.x).
+- `bmad-sprint-planning` — orchestrator's Phase 4 invokes `sprint_plan.py generate --set <key>=done` to advance the PRD branch to its final state.
+- `bmad-build-auto` — converge loops this until the story converges.
+- `bmad-retrospective` — orchestrator's `--retro` mode invokes it per epic.
+- `glab` CLI (GitLab) authenticated against the configured host. (GitHub users go through the same `bmad-issue-tracking-sync` routing via `gh`.)
 
 ## Layout
 
