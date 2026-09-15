@@ -72,10 +72,146 @@ bmad-orchestration/
 
 ## Versioning
 
-Module key: `bmad-orchestration`. Version: `1.0.0` for the initial release. Both skills in this module declare the same version.
+Module key: `bmad-orchestration`. Version: `1.0.0`. Both skills in this module declare the same version.
 
-Until a `v1.0.0` git tag exists on this repo, `bmad setup --doctor` will report the module as `blocked` (can't compare against a tagged release). The install itself is healthy — only the release comparability check fails.
+A `v1.0.0` git tag exists on `main`. `bmad setup --doctor` is happy.
+
+## Usage
+
+Two slash commands are available after install:
+
+### `/bmad-prd-orchestrate`
+
+Drives every story of a PRD through `bmad-build-converge`. The skill asks 4 questions before dispatch (discover resumable runs, scope, HITL cadence, retro, dep inference), then runs Setup → Plan → Execute → Epic boundary → Final report → Cleanup. Halts at decision points for operator input.
+
+Most common invocation: open the slash command, pick `Fresh run`, scope=`Full PRD`, HITL=`Final only`. Resumable runs from previous sessions are auto-discovered.
+
+### `/bmad-build-converge`
+
+Single-story convergence without orchestrator overhead. Useful for fixing one stuck story or testing a converged pipeline without the PRD-level state machine.
+
+```
+/bmad-build-converge --storyKey 3-1-add-tests
+```
+
+## Troubleshooting
+
+### `bmad setup --doctor` reports `blocked` on this module
+
+You installed this repo before the `v1.0.0` git tag existed, OR your local
+cache is stale. Update the install:
+
+```bash
+npx skills update bmad-orchestration
+```
+
+### Orchestrator halts with `sprint_status_path_not_found`
+
+`_bmad-output/implementation-artifacts/sprint-status.yaml` doesn't exist in
+your prd worktree. Run `bmad-sprint-planning` first, then re-dispatch.
+
+### Orchestrator halts with `issue_tracking_yaml_missing`
+
+`_bmad/custom/issue-tracking.yaml` is not present. Install and run
+`bmad-issue-tracking-setup` (v2.x or v3.x to match your BMM layout — see
+the compat table in `docs/compatibility.md`).
+
+### `bmad-build-converge` halts with `workflow is not a function`
+
+A regression in a script. Either an outdated script bundle, or someone
+edited `bmad-build-converge.js` and reintroduced capital-W `Workflow({`.
+Re-pull from the repo and re-dispatch. `test/integration.test.mjs` catches
+this typo class at module-test time.
+
+### Story stays `backlog` after merging the MR externally
+
+The orchestrator probes `origin/<baseBranch>` (not the prd worktree's
+stale working tree). The first probe after a merge happens before the
+working tree catches up. The next iteration of the loop re-fetches and
+sees the new state. If a story stays `backlog` across two iterations
+after a successful merge, file an issue with the run journal.
+
+### Many rebase attempts in a converge run
+
+Converge is fighting sprint-status push conflicts on the shared PRD
+branch. By design, converge does NOT push the done transition under the
+orchestrator — Phase 4 owns that write. If you see rebase loops, you
+have an outdated converge script that hasn't been redeployed. Re-pull
+and re-dispatch.
+
+## Known limitations
+
+- **No body-drift detection in the sync loop.** By design — see
+  `CHANGELOG.md` ("Known limitations") and `docs/compatibility.md`
+  ("What is NOT covered"). Sync handles status labels only;
+  `complete.yaml` workflows refresh bodies on artifact change.
+- **No CI wait inside `bmad-build-auto`'s hook under converge.**
+  Converge creates `<worktreePath>/.bmad-ci-handled` to silence the
+  hook. Without the marker, every consumer is unchanged. See
+  `CLAUDE.md` ("Interference from the module's on_complete hook")
+  for the full rationale.
+- **Sprint-status freshness** — first probe after a merge may see the
+  pre-merge state; the second iteration re-fetches and corrects.
+  Observed in long debug sessions, never in healthy runs.
+
+## Examples
+
+### Fresh run on a single PRD
+
+```bash
+# In your consumer project root, with BMad + bmad-issue-tracking installed:
+/bmad-prd-orchestrate
+# Pick: Fresh run · Full PRD · Final only · Off · Confirm
+```
+
+### Resume a paused run
+
+```bash
+/bmad-prd-orchestrate
+# Pick: <discovered-timestamp> — testprd · 7 completed · 1 blocked · Full PRD · Final only
+```
+
+### Converge a single story directly
+
+```bash
+/bmad-build-converge --storyKey 2-3-sync-drift-reconciliation --maxIterations 5
+```
+
+### End-to-end flow at a glance
+
+```
+user → /bmad-prd-orchestrate
+  → discover runs (1st Q)
+  → user picks scope/HITL/retro/dep-inference
+  → Setup: discover prd worktree, load issue-tracking.yaml, derive setup
+  → Plan: ask plan agent for storyQueue + deps, halt at dep_inference_confirm (if Confirm)
+  → Execute loop:
+      for each sk in storyQueue:
+        recheck skipped[] for newly-met deps
+        probe sk's status from origin/<baseBranch>
+        if done → mark completed, continue
+        if awaiting-operator → park in awaitingOperator[], continue
+        if unmet deps → skip (reason: unmet_deps)
+        else → dispatch bmad-build-converge (sub-workflow)
+              converge creates story worktree, loops bmad-build-auto, polls CI, auto-merges
+        on merge → journal + (issue-comment, issue done — soft-fail)
+        on halts: persist, return to user, await userChoice
+  → Epic boundary: mark epic in-progress on issue tracker (soft-fail)
+  → Per epic: optional bmad-retrospective (if --retro)
+  → Final report: Phase 4 syncs sprint-status + issue labels via bmad-issue-tracking-sync
+  → Cleanup
+```
+
+## Documentation
+
+- `CHANGELOG.md` — release notes + design points + known limitations
+- `LICENSE` — MIT
+- `docs/compatibility.md` — full compat matrix (modules, BMM layouts, platforms)
+- `docs/dev/orchestrator-flow.md` — Mermaid diagrams (end-to-end sequence,
+  per-story lifecycle, halt/resume cycle, Phase 4 sync). Dev reference.
+- `CLAUDE.md` — dev guide for working on this repo (test recipe, layout
+  rules, architecture notes). Not user-facing.
 
 ## License
 
-Same license as upstream BMad (MIT).
+MIT. See `LICENSE`.
