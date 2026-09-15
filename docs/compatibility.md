@@ -89,24 +89,6 @@ reason at Setup — not a generic error.
 
 ## What is NOT covered
 
-- **Body-drift detection in the sync loop** — by design. `sync-issues`
-  handles status labels (cheap, idempotent, safe to run unattended).
-  `complete.yaml` workflows refresh bodies when the source artifact
-  actually changes. Adding continuous body-drift restoration would
-  thrash manual edits. See `CHANGELOG.md` ("Known limitations") and the
-  design intent in `bmad-issue-tracking`'s `SKILL.md`.
-- **Direct tracker / pipeline HTTP calls** — always routed through
-  `Skill: bmad-issue-tracking-sync` or the module's workflow atomics.
-  Hardcoding a platform call would re-introduce the GitLab-specific
-  leak that the deleted `ci-monitor.sh` left behind.
-- **Multi-tenant / per-tenant tracker configuration** — the orchestrator
-  reads `_bmad/custom/issue-tracking.yaml` once at setup and uses it for
-  the whole run. Re-configuring mid-run is not supported.
-- **`sprint_plan.py` story-level done only.** The story-level
-  `--set <key>=done` transitions in `bmad-sprint-planning/scripts/sprint_plan.py`
-  work (the `advanced` counter in the run journal verifies it). The
-  epic-level advancement and the spec→ready-for-dev upgrade inside
-  `sprint_plan.py` silently no-op because of a filename mismatch with
-  this module's producer format (`spec-<id>-<slug>.md` vs
-  `f"{key}.md"`). Fixing belongs upstream in `bmad-sprint-planning`;
-  this module intentionally does not patch around it.
+Scope and design constraints live in `README.md` ("Known limitations")
+and `CHANGELOG.md`. The compat matrix above is the only thing this doc
+owns.
