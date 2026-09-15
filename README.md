@@ -112,8 +112,9 @@ your prd worktree. Run `bmad-sprint-planning` first, then re-dispatch.
 ### Orchestrator halts with `issue_tracking_yaml_missing`
 
 `_bmad/custom/issue-tracking.yaml` is not present. Install and run
-`bmad-issue-tracking-setup` (v2.x or v3.x to match your BMM layout — see
-the compat table in `docs/compatibility.md`).
+[`bmad-issue-tracking`](https://github.com/jrevillard/bmad-issue-tracking)
+v3.0.0 minimum (BMM 6.12+). See `docs/compatibility.md` for the full
+compat table.
 
 ### `bmad-build-converge` halts with `workflow is not a function`
 
@@ -203,7 +204,7 @@ user → /bmad-prd-orchestrate
 
 ## Documentation
 
-- `CHANGELOG.md` — release notes + design points + known limitations
+- `CHANGELOG.md` — release notes (Keep-a-Changelog format)
 - `LICENSE` — MIT
 - `docs/compatibility.md` — full compat matrix (modules, BMM layouts, platforms)
 - `docs/dev/orchestrator-flow.md` — Mermaid diagrams (end-to-end sequence,
