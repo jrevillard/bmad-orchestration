@@ -146,14 +146,8 @@ and re-dispatch.
 ## Known limitations
 
 - **No body-drift detection in the sync loop.** By design — see
-  `CHANGELOG.md` ("Known limitations") and `docs/compatibility.md`
-  ("What is NOT covered"). Sync handles status labels only;
-  `complete.yaml` workflows refresh bodies on artifact change.
-- **No CI wait inside `bmad-build-auto`'s hook under converge.**
-  Converge creates `<worktreePath>/.bmad-ci-handled` to silence the
-  hook. Without the marker, every consumer is unchanged. See
-  `CLAUDE.md` ("Interference from the module's on_complete hook")
-  for the full rationale.
+  `CHANGELOG.md` ("Known limitations"). Sync handles status labels
+  only; `complete.yaml` workflows refresh bodies on artifact change.
 - **Sprint-status freshness** — first probe after a merge may see the
   pre-merge state; the second iteration re-fetches and corrects.
   Observed in long debug sessions, never in healthy runs.
