@@ -1577,7 +1577,7 @@ STEPS:
    - For each epic-N in the file: if EVERY story belonging to epic-N has status 'done', add --set epic-N=done
    (Numeric → canonical mapping: a story canonical key begins with the epic number prefix; epic-N's stories are those whose canonical key starts with that prefix.)
 5. Run ONE batched invocation (avoids partial-write races):
-   python3 ${setup.repoRoot}/.claude/skills/bmad-sprint-planning/scripts/sprint_plan.py generate \\
+   uv run python ${setup.repoRoot}/.claude/skills/bmad-sprint-planning/scripts/sprint_plan.py generate \\
      --epic-file <EPIC_FILE> \\
      --status-file ${setup.sprintStatusPath} \\
      --stories-dir ${setup.prdWorktreePath}/_bmad-output/implementation-artifacts/stories \\

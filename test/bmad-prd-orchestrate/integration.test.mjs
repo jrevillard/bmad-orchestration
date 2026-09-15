@@ -263,3 +263,20 @@ test('guard: read-status helper fetches origin before reading the file', () => {
   assert.doesNotMatch(HELPER, /all-read/,
     'all-read subcommand has been removed; read-status is the sole entry point');
 });
+
+// guard: Phase 4 must invoke sprint_plan.py through `uv run python`, NOT
+// `python3` direct. sprint_plan.py has PEP 723 inline metadata
+// (`requires-python >=3.10` + `dependencies = ["ruamel.yaml>=0.18"]`),
+// which only `uv run` auto-resolves. A bare `python3` invocation depends
+// on the consumer having ruamel.yaml installed system-wide — fragile
+// across clean consumer installs. This module's own write-state.sh uses
+// `uv run python`; Phase 4 must follow the same pattern.
+test('guard: Phase 4 invokes sprint_plan.py via uv run python (not python3 direct)', () => {
+  const src = readFileSync(ORCHESTRATOR_PATH, 'utf8');
+  assert.match(src, /uv\s+run\s+python[^]*sprint_plan\.py/,
+    'Phase 4 must invoke sprint_plan.py via `uv run python` (PEP 723 deps)');
+  // Forbid the bare python3 path. Match the exact pattern used in the
+  // Phase 4 prompt template — `python3 .../sprint_plan.py`.
+  assert.doesNotMatch(src, /python3\s+\$\{setup\.repoRoot\}\/\.claude\/skills\/bmad-sprint-planning\/scripts\/sprint_plan\.py/,
+    'Phase 4 must NOT invoke sprint_plan.py via bare `python3` — use `uv run python` so PEP 723 deps resolve');
+});

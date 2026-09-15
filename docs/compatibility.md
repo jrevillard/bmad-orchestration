@@ -30,7 +30,7 @@ These are **not** module dependencies — they are BMad's own skills and CLIs th
 | Component | Why |
 |---|---|
 | BMad (BMM 6.12+ same floor as `bmad-issue-tracking` v3.x) | Provides `_bmad-output/{planning,implementation}-artifacts/`. The orchestration skills run on top of BMad. |
-| `bmad-sprint-planning` (skill) | This skill ships `sprint_plan.py` in its `scripts/` folder. The orchestrator's Phase 4 invokes that script directly via `python3` (filesystem path, not `Skill:` routing) to write the done transition into `sprint-status.yaml`. |
+| `bmad-sprint-planning` (skill) | This skill ships `sprint_plan.py` in its `scripts/` folder. The orchestrator's Phase 4 invokes that script directly via `uv run python` (filesystem path, not `Skill:` routing) to write the done transition into `sprint-status.yaml`. The `uv run` wrapper is required because `sprint_plan.py` has PEP 723 inline metadata declaring `dependencies = ["ruamel.yaml>=0.18"]`; `uv` resolves it automatically. Matches the pattern used by this module's own `write-state.sh`. |
 | `bmad-build-auto` | Converge loops this until the story converges. |
 | `bmad-retrospective` | Orchestrator's `--retro` mode invokes it per epic. |
 | `glab` CLI (GitLab) | Authenticated against the configured host. GitHub users go through the same `bmad-issue-tracking-sync` routing via `gh`. |
